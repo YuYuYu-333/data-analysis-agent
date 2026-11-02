@@ -1,0 +1,30 @@
+# 密钥
+.env
+
+# 生成物
+*.db
+*.db-journal
+schema_index.json
+eval/raw.json
+
+# 本地笔记,不进仓库
+PLAN.md
+PROJECT_PLAN.md
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+.venv-*/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# 系统文件
+.DS_Store
+Thumbs.db
