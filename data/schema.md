@@ -158,6 +158,16 @@ SUM(CASE WHEN i.refunded = 1 THEN 1 ELSE 0 END) * 1.0 / COUNT(*)
 - **「上月」固定指 2026-09**（相对 `as_of`），不要用 `date('now')`，否则参考 SQL 会随时间失效。
 - 数据从 2026-05 开始：5 月没有环比（上期不存在）。
 
+### 8.7 派生指标与排名
+
+- **退款金额** = `SUM(sales_item.refund_amount)`，仅统计 `completed` 订单。
+- **退款订单数** = 至少有一条 `refunded = 1` 明细的 `completed` 订单数，按 `order_id` 去重。
+- **取消率** = `cancelled` 订单数 / 全部订单数（分母包含两种状态）。
+- **占比** = 部分 / 全部；分子分母使用同一范围（同一时间、同一门店 / 大区 / 渠道）。
+- **销售件数** = `SUM(sales_item.quantity)`，仅统计 `completed` 订单；退款只冲金额，不冲件数。
+- **排名** = 按指标从高到低（`DESC`）；并列时按名称升序（`ASC`）作为稳定次序。
+- **Top N / 第 N 名** = 先按上面的规则排名，再 `LIMIT` / `OFFSET`。
+
 ## 9. 已知陷阱
 
 1. **取消订单的明细还在表里**：任何经营指标都要 `JOIN sales_order` 并过滤 `status = 'completed'`，否则结果虚高。
