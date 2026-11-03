@@ -9,14 +9,21 @@ from typing import Any
 FLOAT_TOL = 1e-6
 
 
+def _round_for_compare(value: float) -> float:
+    """参考 SQL 金额保留 2 位、比率保留 4 位；比较时按同样精度归一化。"""
+    if abs(value) < 1:
+        return round(value, 4)
+    return round(value, 2)
+
+
 def _normalize_value(value: Any) -> tuple:
     """int / float 统一成 float；字符串去首尾空白；NULL 单独标记。"""
     if value is None:
         return ("null", None)
     if isinstance(value, bool):
-        return ("num", float(value))
+        return ("num", _round_for_compare(float(value)))
     if isinstance(value, (int, float)):
-        return ("num", float(value))
+        return ("num", _round_for_compare(float(value)))
     if isinstance(value, str):
         return ("str", value.strip())
     return ("other", repr(value))

@@ -35,3 +35,11 @@ def test_row_count_must_match():
 
 def test_different_values_do_not_match():
     assert not rows_match([[1]], [[2]])
+
+
+def test_money_rounding_matches_reference_precision():
+    assert rows_match([[127.661251]], [[127.66]])
+
+
+def test_rate_rounding_matches_reference_precision():
+    assert rows_match([[0.09255079]], [[0.0926]])
