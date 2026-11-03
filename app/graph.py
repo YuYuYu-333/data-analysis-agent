@@ -3,11 +3,11 @@ LangGraph 图：检索 schema → 生成 SQL → 执行 → 重试/出答案。
 当前只做单轮；多轮和溯源在后续接。
 """
 
-import json
 import re
 
 from langgraph.graph import END, START, StateGraph
 
+from app.checkpointer import get_checkpointer, close_checkpointer
 from app.llm import CHAT_MODEL, chat_client
 from app.mcp_client import execute_sql as mcp_execute_sql
 from app.mcp_client import search_schema
@@ -134,19 +134,24 @@ def build_answer(state: AnalysisState) -> dict:
     rows = state.get("rows") or []
 
     if not rows:
-        answer = "没有查到符合条件的数据."
+        answer = "没有查到符合条件的数据。"
     else:
         lines = [" | ".join(columns)]
         for row in rows[:20]:
             lines.append(" | ".join("" if value is None else str(value) for value in row))
         if len(rows) > 20:
-            lines.append(f"... (共 {len(rows)} 行,仅显示前 20 行)")
+            lines.append(f"...（共 {len(rows)}行，仅显示前 20 行）")
         answer = "\n".join(lines)
+
+    history = list(state.get("history") or [])
+    history.append({"question": state.get("question", ""), "sql": state.get("sql", "")})
+    history = history[-2:]
 
     return {
         "answer": answer,
         "citations": [],
         "degraded": False,
+        "history": history,
         "trace": ["answer built"],
     }
 
@@ -163,31 +168,42 @@ def give_up(state: AnalysisState) -> dict:
     }
 
 
-builder = StateGraph(AnalysisState)
-builder.add_node("retrieve_schema", retrieve_schema)
-builder.add_node("generate_sql", generate_sql)
-builder.add_node("execute_sql", execute_sql_node)
-builder.add_node("build_answer", build_answer)
-builder.add_node("verify_citations", verify_citations)
-builder.add_node("give_up", give_up)
+def build_graph(checkpointer=None):
+    builder = StateGraph(AnalysisState)
+    builder.add_node("retrieve_schema", retrieve_schema)
+    builder.add_node("generate_sql", generate_sql)
+    builder.add_node("execute_sql", execute_sql_node)
+    builder.add_node("build_answer", build_answer)
+    builder.add_node("verify_citations", verify_citations)
+    builder.add_node("give_up", give_up)
 
-builder.add_edge(START, "retrieve_schema")
-builder.add_edge("retrieve_schema", "generate_sql")
-builder.add_edge("generate_sql", "execute_sql")
-builder.add_conditional_edges(
-    "execute_sql",
-    route,
-    {
-        "retry": "generate_sql",
-        "answer": "build_answer",
-        "give_up": "give_up",
-    },
-)
-builder.add_edge("build_answer", "verify_citations")
-builder.add_edge("verify_citations", END)
-builder.add_edge("give_up", END)
+    builder.add_edge(START, "retrieve_schema")
+    builder.add_edge("retrieve_schema", "generate_sql")
+    builder.add_edge("generate_sql", "execute_sql")
+    builder.add_conditional_edges(
+        "execute_sql",
+        route,
+        {
+            "retry": "generate_sql",
+            "answer": "build_answer",
+            "give_up": "give_up",
+        },
+    )
+    builder.add_edge("build_answer", "verify_citations")
+    builder.add_edge("verify_citations", END)
+    builder.add_edge("give_up", END)
 
-graph = builder.compile()
+    return builder.compile(checkpointer=checkpointer)
+
+
+_graph = None
+
+
+async def get_graph():
+    global _graph
+    if _graph is None:
+        _graph = build_graph(await get_checkpointer())
+    return _graph
 
 
 async def analyze(question: str, session_id: str = "default", schema_mode: str = "rag") -> dict:
@@ -198,11 +214,26 @@ async def analyze(question: str, session_id: str = "default", schema_mode: str =
         "attempts": 0,
         "trace": [],
     }
-    return await graph.ainvoke(state)
+    config = {"configurable": {"thread_id": session_id}}
+    graph = await get_graph()
+    return await graph.ainvoke(state, config=config)
 
 
 if __name__ == '__main__':
     import asyncio
 
-    result = asyncio.run(analyze("2026 年 9 月华东大区的销售额是多少？"))
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+    async def _demo() -> None:
+        try:
+            first = await analyze("2026 年 9 月华东大区的销售额是多少？", session_id="demo")
+            print("T1 sql:", first.get("sql"))
+            print("T1 rows:", first.get("rows"))
+
+            second = await analyze("那华南呢？", session_id="demo")
+            print("T2 sql:", second.get("sql"))
+            print("T2 rows:", second.get("rows"))
+        finally:
+            await close_checkpointer()
+
+
+    asyncio.run(_demo())

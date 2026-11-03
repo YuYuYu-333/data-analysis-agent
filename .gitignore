@@ -4,6 +4,8 @@
 # 生成物
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 schema_index.json
 eval/raw.json
 

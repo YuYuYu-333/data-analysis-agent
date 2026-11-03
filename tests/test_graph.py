@@ -36,4 +36,33 @@ def test_build_answer_rows():
 
 def test_build_answer_empty():
     result = build_answer({"columns": ["n"], "rows": []})
-    assert result["answer"] == "没有查到符合条件的数据."
+    assert result["answer"] == "没有查到符合条件的数据。"
+
+
+def test_build_answer_appends_history():
+    result = build_answer(
+        {
+            "question": "q1",
+            "sql": "SELECT 1",
+            "columns": ["n"],
+            "rows": [[1]],
+            "history": [],
+        }
+    )
+    assert result["history"] == [{"question": "q1", "sql": "SELECT 1"}]
+
+
+def test_build_answer_keeps_last_two_history():
+    result = build_answer(
+        {
+            "question": "q3",
+            "sql": "SELECT 3",
+            "columns": ["n"],
+            "rows": [[3]],
+            "history": [
+                {"question": "q1", "sql": "s1"},
+                {"question": "q2", "sql": "s2"},
+            ],
+        }
+    )
+    assert [item["question"] for item in result["history"]] == ["q2", "q3"]

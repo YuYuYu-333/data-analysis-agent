@@ -14,6 +14,10 @@ load_dotenv(ROOT / ".env")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
 
+# 可选
+CHECKPOINT_DB = Path(os.getenv("CHECKPOINT_DB") or ROOT / "data" / "checkpoints.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 
 def _require(name: str, value: str | None) -> None:
     if not value:
