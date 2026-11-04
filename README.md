@@ -1,0 +1,497 @@
+# 零售数据分析 Agent
+
+![tests](https://github.com/YuYuYu-333/data-analysis-agent/actions/workflows/ci.yml/badge.svg)
+
+用自然语言问零售数据。Agent 把问题翻译成一条只读 SQL，执行后给出中文结论——**结论里的每个数字都必须能追溯到结果集的某一格**，追溯不到就降级成纯表格，不编。
+
+多轮追问会继承上文："那华南呢？"这句话里既没有时间也没有指标，系统照样答出华南 9 月的销售额。
+
+- **六节点图**：`retrieve_schema → generate_sql → execute_sql → route → build_answer → verify_citations`，出错回填重试，硬上限 3 次
+- **多轮**：`AsyncSqliteSaver` 按 `session_id` 持久化，最近两轮 `(问题, SQL)` 进 prompt
+- **数字溯源**：回答里的每个数字都要在结果单元格里找到出处，否则整段降级为表格
+- **只读防护**：四道硬拦截（只读连接 / SELECT·WITH 白名单 / 关键字黑名单 / 多语句），外加 1000 行上限与 5 秒超时
+- **RAG 检索**：`schema.md` 切 22 块，bge-m3 向量化，取 top 5；命中「销售额 / 退款率 / 环比」时强制带入口径块
+- **工具层隔离**：两个 MCP stdio Server，应用进程里**没有数据库路径，也没有连接对象**
+- **L3 外壳**：API key 鉴权、IP 限流、`request_id` 结构化日志、Prometheus 指标
+- **可评测**：20 题单轮对照 + 50 轮多轮评测，判定器与题库都在仓库里
+
+**技术栈**：Python 3.13 · FastAPI · LangGraph · RAG · MCP · DeepSeek · bge-m3 · SQLite · Prometheus · pytest
+
+## 目录
+
+| 想了解什么 | 看这一节 |
+|---|---|
+| 5 分钟跑起来 | [快速开始](#快速开始) |
+| 分成哪几层、一次请求怎么走 | [架构](#架构) |
+| 每个选择为什么这么做、代价是什么 | [设计决策](#设计决策) |
+| 6 个端点和状态码 | [接口](#接口) |
+| 三组实验数字、判定规则、失败分析 | [评估](#评估) |
+| 出错时系统怎么表现 | [故障处理](#故障处理) |
+| 11 条已知局限，每条都写了该怎么改 | [已知局限](#已知局限) |
+| 九次「没有报错但结果是错的」 | [迭代记录](#迭代记录) |
+
+## 快速开始
+
+> 需要 Python 3.13。下面命令是 Windows PowerShell 写法；Linux/macOS 把路径换成对应的即可。
+
+### 1. 安装依赖
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt
+```
+
+首次执行报「禁止运行脚本」时，先放开当前会话的策略：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+### 2. 配置密钥
+
+```powershell
+Copy-Item .env.example .env
+```
+
+| 变量 | 用途 | 必需 |
+|---|---|---|
+| `DEEPSEEK_API_KEY` | 生成 SQL、写结论 | 是 |
+| `SILICONFLOW_API_KEY` | schema 切片向量化（`BAAI/bge-m3`） | 是 |
+| `API_KEY` | `/analyze` 的请求密钥；不填则该接口返回 503，`/demo` 不受影响 | 否 |
+| `CHECKPOINT_DB` | 多轮检查点位置，默认 `data/checkpoints.db` | 否 |
+| `DEBUG` | 设为 `1` 时响应里返回 `trace` | 否 |
+
+`.env` 在 `.gitignore` 里。密钥缺失时 `app/config.py` 在 **import 阶段**就抛 `RuntimeError`，不会等到第一个请求才发现。
+
+首尾两个变量不是必需项，判据在「设计决策 1」。
+
+### 3. 生成数据
+
+```powershell
+.venv\Scripts\python.exe scripts\generate_data.py
+```
+
+生成 `data/retail.db`（12 门店 / 60 商品 / 5000 订单 / 13572 明细，固定种子，可复现）。这个文件不进仓库。
+
+### 4. 一条命令启动
+
+```powershell
+.\scripts\start.ps1
+```
+
+脚本会先检查 `.venv`、`.env`、`data\retail.db` 三样东西，缺哪个就打印该跑的修复命令再退出——而不是让新人对着一个 import 栈发呆。
+
+打开 <http://127.0.0.1:8000> 直接用页面问；接口文档在 `/docs`。
+
+### 5. 跑测试
+
+```powershell
+pytest
+```
+
+83 个测试，不调真实模型、不需要网络。CI 在干净的 Ubuntu + Python 3.13 上重跑同一套。
+
+## 架构
+
+### 分层
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| HTTP 层 | `app/api.py` | 路由、鉴权、限流、中间件、指标。**全项目唯一知道 HTTP 存在的文件** |
+| 图编排层 | `app/graph.py` | 六个节点、条件边、prompt |
+| 纯粹逻辑 | `app/answer.py` | 表格格式化与溯源校验，纯函数，不碰网络和数据库 |
+| 工具客户端 | `app/mcp_client.py` | 拉起两个 MCP Server，持有常驻会话 |
+| 工具实现 | `mcp_servers/*.py` | schema 检索、只读 SQL 执行、四道拦截 |
+| 基础设施 | `app/llm.py` / `checkpointer.py` / `config.py` / `logging.py` / `limits.py` | 客户端、持久化、配置、日志、限流 |
+
+依赖方向单向向下，`answer.py` 只 import 标准库——所以它是全项目测试最密的文件。
+
+**这条约束换来一件事**：溯源逻辑能脱离模型单测。`find_citations()` 收三个参数、返回两个列表，测试可以直接喂 `"比 8 月少了 2445.54"` 和 `[[-2445.54]]` 看它认不认。
+
+### 一次请求的完整流程
+
+```
+POST /demo/analyze  { question, session_id }
+  │
+  ├─ 中间件：生成 request_id → set 进 contextvars → 开始计时
+  ├─ 限流：最近 60 秒内该 IP 是否已满 5 次 → 满了 429
+  │
+  ├─ analyze(question, session_id)      session_id 即 LangGraph 的 thread_id
+  │    │
+  │    ├─ retrieve_schema   MCP → search_schema(query, top_k=5)
+  │    ├─ generate_sql      带 schema + 最近两轮 + 上次 error
+  │    ├─ execute_sql       MCP → execute_readonly_sql
+  │    │
+  │    ├─ route  ── 有错且 attempts < 3 ──→ 回到 generate_sql
+  │    │         ├─ 有错且 attempts >= 3 ──→ give_up（如实说查不出来 + 最后一条错误）
+  │    │         └─ 无错 ─────────────────→ build_answer
+  │    │
+  │    ├─ build_answer      基于结果集写一句话
+  │    └─ verify_citations 每个数字找出处；找不到 → 整段换成表格，degraded=true
+  │
+  ├─ 记录指标与日志（tokens / attempts / 是否降级）
+  └─ 返回 JSON + X-Request-ID 响应头
+```
+
+**重试带的是信息，不是运气**：回填给 `generate_sql` 的是数据库原文错误（`no such column: sale_date`），不是「再生成一次」。这条错误本身就是最强的提示。
+
+**溯源的结果是降级而不是报错**：模型说了个结果集里没有的数字，用户需要的仍然是一份可用的答案——所以把自然语言换成纯表格，并且明确标记 `degraded=true`。宁可难看，不可失真。
+
+<details>
+<summary><b>目录结构</b>（点开）</summary>
+
+```
+data-analysis-agent/
+├── app/
+│   ├── api.py            FastAPI：路由、鉴权、限流、中间件、指标
+│   ├── models.py         Pydantic 请求/响应模型
+│   ├── graph.py          六节点图 + prompt
+│   ├── state.py          AnalysisState（trace / tokens 用 operator.add 累加）
+│   ├── answer.py         格式化与溯源校验（纯函数）
+│   ├── mcp_client.py     两个 MCP Server 的常驻会话
+│   ├── checkpointer.py   AsyncSqliteSaver 工厂
+│   ├── llm.py            DeepSeek / SiliconFlow 客户端
+│   ├── limits.py         滑动窗口限流
+│   ├── logging.py        JSON 日志 + request_id contextvar
+│   └── config.py         环境变量 + import 期校验
+├── mcp_servers/
+│   ├── schema_server.py  22 块 schema 检索（bge-m3 + 指标关键词强制召回）
+│   └── db_server.py      只读执行 + 四道拦截 + 资源限制
+├── scripts/
+│   ├── generate_data.py  生成 retail.db（固定种子）
+│   └── start.ps1         本地一条命令
+├── eval/
+│   ├── questions.jsonl   20 会话 / 50 轮
+│   ├── run_eval.py       采集：跑题、比对、写 raw-*.json
+│   ├── judge.py          结果集规范化与比对
+│   └── report.md         分析报告
+├── web/
+│   └── index.html        单页 UI（无构建、无 CDN）
+├── tests/                83 个测试
+└── data/
+    ├── schema.md         表结构 + 业务口径（提交）
+    └── retail.db         生成物（不提交）
+```
+
+</details>
+
+## 设计决策
+
+### 1. 必需项和可选优化分开处理
+
+`app/config.py` 在 import 阶段检查两个模型密钥，缺一个直接 `RuntimeError`。而 `API_KEY` 故意不检查——没配时 `/analyze` 返回 503「服务未配置」，`/demo` 和评测脚本照常能用。
+
+判据：**缺了它，程序还有没有一条正确的运行方式？**
+
+没有模型密钥，整个系统没有任何可用路径，早崩比晚崩好；没有 API key，公开演示和本地评测都正常，只是正式接口关着门。把可选的东西设成准入条件，会让新克隆仓库的人连 `pytest` 都跑不起来。
+
+**代价**：`import app.api` 本身要求密钥齐全，所以跑单元测试也得先有 `.env`。CI 里塞两个 `dummy` 值绕过——测试本来就不调真实模型。
+
+### 2. 判定器宁可放过形状差异，不放过错答案
+
+参考结果和模型结果比对时，最初用「排序后逐位相等」。结果 E08 和 E20 一题判错一题判对，仔细看是同一个问题：模型多带了一列 `product_id`。
+
+先改题库（去掉多余列），E20 又反过来失败——模型自己把那一列加回来了。**这说明问题不在题，在尺子。**
+
+改成多重集包含：候选行必须覆盖参考行里的每个值，允许候选多出列；行数必须相等。
+
+**代价**：判定变宽松了，"多返一列无关信息"不再算错。这是有意的取舍——SQL 的列数是表达习惯，不是正确性。行数仍然严格，因为行数多一行少一行通常意味着筛选条件错了。
+
+### 3. MCP 客户端用常驻会话，不是每次 `get_tools()`
+
+`langchain-mcp-adapters` 的 `MultiServerMCPClient.get_tools()` 返回的工具，**每次调用都会新起一个子进程**。后果有两个：
+
+一是慢——`schema_server` 启动时要给 22 个块做 embedding，每题重跑一遍，50 道题就是 1100 次向量调用；
+二是退出时 Windows 卡在 `process.wait()`，终端 Ctrl+C 都出不来。
+
+改成 `client.session(name)` + `load_mcp_tools(session)`：启动时连一次，全程复用。
+
+**代价**：会话和事件循环任务绑定了。anyio 规定 cancel scope 必须在进入它的同一个任务里退出，而 LangGraph 的节点跑在子任务里——在节点里第一次连接，收尾时就会报 `Attempted to exit cancel scope in a different task`。所以必须在 `run()` 或 `lifespan` 这种「主任务」里显式调用一次 `connect()`。这条约束写在了函数 docstring 里。
+
+### 4. 溯源允许符号翻转，也豁免日期
+
+`verify_citations` 在回答里找数字，逐个去结果集里找出处。三条例外是后来加的：
+
+- **符号翻转**：单元格是 `-2445.54`，回答里写「比 8 月少了 2445.54」。人说话不带负号，这是同一个数。
+- **日期**：`2026-09-04` 里的 `2026`、`09`、`04` 不是业务数字，且日期在结果里是字符串，本来也匹配不上数值单元格。
+- **问题里已有的数字**：用户问「9 月」，回答里出现 9 不算编造。
+
+**代价**：放宽之后，理论上「把 -5 说成 5」这种真正的符号错误不会再被抓住。判断依据是——溯源要回答的是「这个数有没有出处」，不是「正负说没说明白」。
+
+### 5. 多轮靠 prompt 规则继承，不靠模型自觉
+
+50 轮评测里曾有 8 条多轮题失败，其中 6 条是同一个原因：追问时把上一轮的时间范围丢了。「那华南呢？」——模型生成了一条不带 `order_date` 过滤的 SQL，答的是全时段。
+
+修法是在 `SYSTEM_PROMPT` 里加一条硬规则：
+
+```
+5. 这是多轮对话：新问题没有重新限定时间时，必须沿用上一轮 SQL 的时间范围；
+   其他筛选条件（大区 / 渠道 / 品类 / 状态）同理，除非新问题明确改掉或扩大范围。
+```
+
+修完这几条转绿。
+
+**代价**：这是软约束，模型仍可能偶尔无视。真正硬的方案是把上一轮 SQL 的结构化条件提取出来拼进 prompt，或者做查询重写——工程量高一个数量级，留作已知局限。
+
+### 6. 限流放在进程内存，接受单实例语义
+
+滑动窗口用 `deque` 存每次请求的时间戳，超过 60 秒的丢掉。放内存而不是 Redis，因为部署目标是单实例。
+
+**为什么不用「每分钟清零一个计数器」**：清零式在第 59 秒打满、第 61 秒再打满，两秒内实际放行两倍。滑动窗口在任何 60 秒区间内都不超限。
+
+**代价**：重启归零；多实例各算各的。这两条都写进了已知局限——达到 L4 之前不值得引入 Redis。
+
+### 7. `request_id` 用 contextvars 贯穿，而不是层层传参
+
+每个请求生成一个短 id，`set` 进 `ContextVar`。`JsonFormatter` 每次格式化都去取值，所以该请求整条调用链上的日志自动带上同一个编号，路由函数、节点函数都不用改签名。
+
+响应头 `X-Request-ID` 把它交给客户端——用户报错时贴这一串，日志里一搜就是完整现场。
+
+**代价**：`ContextVar` 跟着异步任务走，跨 `to_thread` 会丢。项目里没有这种用法，但一旦引入线程池就需要额外传递。
+
+### 8. RAG 的语料是 schema 和业务口径，不是文档
+
+这个项目里的检索增强不是"文档问答"，语料是 `data/schema.md`：四张表的列与类型、业务口径（销售额 = `SUM(amount - refund_amount)`、退款率的分母是明细行数、环比按自然月）、以及四个已知陷阱（`LEFT JOIN` 放大行数、取消订单要不要计入、退款是否重复扣减）。
+
+**流水线**：
+
+```
+schema.md  →  切成 22 块  →  bge-m3 向量化（启动时一次）  →  内存中的 22 个向量
+                                                                    │
+问题  →  embedding  →  余弦相似度  →  top 5 块  ────────────────────┘
+                                        │
+                                        ▼
+                          拼进 generate_sql 的 prompt
+```
+
+**为什么还要一层 `METRIC_HINTS`**：用户问"卖了多少"，口径块里写的是"销售额 = `SUM(amount - refund_amount)`"，字面几乎没有重合，纯向量检索会把口径块漏掉。所以命中「销售额 / 退款率 / 环比 / 排名」这类关键词时，强制把对应小节加进上下文，不参与打分。
+
+**这条流水线的收益就是那 25% → 100%**：只给列名时模型靠猜，接上检索后 20 题全对且全部一次过。RAG 在这里解决的不是"说什么"，而是"**怎么查**"。
+
+**代价**：语料只有 22 块，放在内存里、每次线性扫一遍就够；数据量上来（几百张表）时，这套要换成真正的向量库 + 分块策略，届时"取 top 5"也得重新评估。
+
+## 接口
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| `GET` | `/` | 无 | 单页 UI |
+| `POST` | `/demo/analyze` | 无 | 公开演示，每 IP 每分钟 5 次 |
+| `POST` | `/analyze` | `X-API-Key` | 正式接口，每分钟 30 次（单 key，全局计数） |
+| `GET` | `/health` | 无 | 进程存活，不检查依赖 |
+| `GET` | `/ready` | 无 | checkpointer 与 MCP 是否就绪，不可用时 503 |
+| `GET` | `/metrics` | 无 | Prometheus 文本格式 |
+
+### POST /analyze
+
+```json
+{ "question": "2026年9月华东大区的销售额是多少？", "session_id": null }
+```
+
+```json
+{
+  "session_id": "3f9c8a...",
+  "answer": "2026年9月华东大区的销售额是24884.15。",
+  "columns": ["sales_amount"],
+  "rows": [[24884.15]],
+  "row_count": 1,
+  "truncated": false,
+  "citations": [{"value": 24884.15, "row": 0, "column": "sales_amount"}],
+  "attempts": 1,
+  "degraded": false,
+  "trace": null
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `session_id` | 不传则新建；传回同一个即可继续追问 |
+| `citations` | 每个数字来自第几行、哪一列；降级时为空 |
+| `degraded` | 溯源未通过，`answer` 已被替换为纯表格 |
+| `truncated` | 结果超过 1000 行，只返回前 1000 |
+| `trace` | 仅 `DEBUG=1` 时返回，每个节点的执行轨迹 |
+
+**状态码：**
+
+| 码 | 什么时候出现 |
+|---|---|
+| `200` | 正常返回 |
+| `401` | API key 缺失或错误 |
+| `422` | 问题为空或超过 500 字 |
+| `429` | 超过每分钟请求上限 |
+| `503` | 未配置 `API_KEY`；或 `/ready` 检测到依赖不可用 |
+| `500` | 未预期异常（日志带 `request_id`，不回内部细节） |
+
+## 评估
+
+分三组，因为「答错」和「检索没给对材料」是两件事，混在一起看不出因果。
+
+| # | 实验 | 规模 | 首次成功 | 说明 |
+|---|---|---|---|---|
+| 1 | 只给四个表的列名 | 20 题 | 5/20 = 25% | 无检索，模型常猜错列名与聚合口径 |
+| 2 | 接 schema RAG（`top_k=5`） | 20 题 | 20/20 = 100% | 全部 `attempts=1` |
+| 3 | 多轮 50 轮 | 50 题 | 46/50 = 92% | 最终 47/50 = 94%，有 1 题在第 2 次尝试自行纠正 |
+
+第 3 组细分：**指代消解 27/30 = 90%**，平均尝试 1.02 次，**溯源率 100%**，降级率 0%。
+按难度：易 13/15、中 24/25、难 10/10。
+
+复现：
+
+```powershell
+.venv\Scripts\python.exe -m eval.run_eval --mode columns --turns first
+.venv\Scripts\python.exe -m eval.run_eval --mode rag     --turns first
+.venv\Scripts\python.exe -m eval.run_eval --mode rag     --turns all
+# 单会话排查
+.venv\Scripts\python.exe -m eval.run_eval --mode rag --turns all --session E07
+```
+
+结果写进 `eval/raw-{mode}-{turns}-{session}.json`（不进仓库），分析见 [`eval/report.md`](eval/report.md)。
+
+### 那 3 道失败题是什么
+
+| 题 | 现象 | 归类 |
+|---|---|---|
+| E04 T2 | 线上订单占比算出 41.76% | 口径理解不同 |
+| E16 T2 | 返回 2 行，参考 1 行 | 结果形状差异 |
+| E18 T2 | 少一列维度 | 结果形状差异 |
+
+三题都答出了业务上说得通的结果，和参考 SQL 的口径或形状不同。判定器不做语义判断，一律记失败——**宁可报低，不报高**。
+
+### 评估本身的局限
+
+- **单次运行**：`temperature=0` 不保证确定性，同一套题多次运行会浮动 1–3 题
+- **题库由开发者编写**：可能无意识地贴合自己的实现表述
+- **50 题**：一题就是 2 个百分点，只能看方向
+- **判定器只比结果集**：不看 SQL 写得漂亮不漂亮，也不看解释是否易懂
+- **100% 不代表生产可用**：真实问题的分布和这 50 道题不同
+
+## 故障处理
+
+原则一条：**能补救的降级，不能补救的失败。**
+
+| 场景 | 系统行为 | 验证方式 |
+|---|---|---|
+| 缺少模型密钥 | `config.py` 在 import 阶段抛 `RuntimeError`，服务起不来 | `test_required_rejects_empty` |
+| 未配置 `API_KEY` | `/analyze` 返回 **503** 并说明未配置；`/demo` 不受影响 | `test_analyze_without_configured_key_returns_503` |
+| API key 错误 | **401** | `test_analyze_with_wrong_key_returns_401` |
+| 超过限流 | **429**，被拒的请求也计数 | `test_demo_rate_limit_returns_429` |
+| 不同 IP 互不影响 | 各自独立计数 | `test_different_ips_have_separate_quota` |
+| 危险 SQL | 四道拦截全部拒绝，返回结构化错误 | 12 条参数化测试 |
+| 结果超 1000 行 | 截断并置 `truncated=true` | `test_row_limit_marks_truncated` |
+| SQL 写错 | 错误回填 `generate_sql` 重试，最多 3 次 | 图的条件边 |
+| MCP 子进程崩溃 | `execute_sql_node` 接住异常 → 错误 → 重试 → 仍失败则 `give_up` | 代码路径 |
+| 答案里有编造的数字 | 整段降级为表格，`degraded=true` | `test_sign_flip_still_counts_as_citation` 等 11 条 |
+| 依赖挂了 | `/ready` 返回 **503**，`checks` 里指出是哪一项；`/health` 仍是 200 | 手工：停掉 MCP 后访问 |
+
+## 已知局限
+
+| 问题 | 影响 | 应该怎么改 |
+|---|---|---|
+| 合成数据 | `retail.db` 由固定种子脚本生成，不是真实业务数据 | 接一份脱敏真实数据重跑评测；现有题库仍可复用 |
+| 模型非确定性 | 同一组题多次运行，成功率和溯源率都有波动 | 每题跑 3 次取多数；或把 `temperature` 之外的因素（措辞）也固定住 |
+| 3 道题结果形状不一致 | 94% 里有 3 道是判错而非答错 | 判定器加语义等价判断，或参考答案同时接受多种形状 |
+| 限流与配额在进程内存 | 重启归零，多实例各算各的 | 换 Redis 计数器（Lua 保证 `INCR`+`EXPIRE` 原子） |
+| `/metrics` 无鉴权 | 任何人都能读到请求量、耗时分布 | 加内网限制或单独的口令 |
+| 限流按单 key 全局计数 | 多把 key 时会互相影响 | `allow(x_api_key)` 按 key 分开 |
+| 多轮继承靠 prompt | 模型偶尔仍会丢时间范围 | 提取上一轮 SQL 的条件做查询重写 |
+| 无流式输出 | 首字延迟等于总耗时，平均 3.5 秒 | 接 SSE，逐节点下发进度 |
+| Render 免费层休眠 | 冷启动需要数十秒 | 保活探针（注意别因此超额），或升付费层 |
+| SQLite 检查点在容器里不持久 | 重新部署后多轮会话丢失 | 接 Neon，换 `PostgresSaver`；`DATABASE_URL` 已预留 |
+| 未做多租户 / SLO / 压测 / 告警 | 单人可用的演示级系统 | L4 的范围，不在本版本目标内 |
+
+## 迭代记录
+
+九个都是**没有任何报错、但结果是错的**。
+
+<details>
+<summary><b>展开九次迭代的完整记录</b></summary>
+
+### 1. 整个模块导入不了，10 个测试收集失败
+
+**现象**：`pytest` 报收集错误，`app/graph.py` 一行都跑不了。
+
+**根因**：`if __name__ == '__main__':` 那段演示代码里，`finally:` 上面没有 `try:`。
+
+**这条值得记住的地方**：语法错误是**编译期**的。哪怕那个 `finally` 只在 `__main__` 里执行，整个文件也解析不了——一个给演示用的代码块，把整个模块拖下水。
+
+### 2. 评测全绿，其实是尺子太严
+
+**现象**：20 题单轮里 E08 和 E20 一题过一题不过。
+
+**发现**：两题的参考 SQL 都多写了 `p.product_id`。先改题库去掉这一列，结果 E20 反过来失败——模型这回自己把 `product_id` 加回来了。
+
+**根因**：问题不在题，在判定器。「排序后逐位相等」把列数当成了正确性的一部分。
+
+**修复**：改成多重集包含，允许候选多出列，行数仍严格相等。改完两题都绿，且没有放过任何真正的错答案。
+
+### 3. 8 条多轮题失败，6 条是同一个原因
+
+**现象**：50 轮跑出 42/50，多轮题几乎全军覆没。
+
+**发现**：把失败题的 SQL 逐条拉出来看，6 条都少了 `order_date` 过滤——追问「那华南呢」时，回答的是全时段数据。
+
+**根因**：prompt 里只给了最近两轮的历史，但没说「没说时间就等于沿用上次」。模型把追问当成了一道独立的新题。
+
+**修复**：`SYSTEM_PROMPT` 加第 5 条规则，明确要求继承时间与筛选条件，除非新问题改掉或扩大范围。同时把 history 的标签改成「追问时默认继承它们的时间范围和筛选条件」，让模型知道那两轮是干什么用的。
+
+### 4. `O000590` 被当成数字，触发假降级
+
+**现象**：E07 T3 一直 `degraded=true`，但答案本身是对的。
+
+**发现**：订单号 `O000590` 里的 `000590` 被正则当成数值，去结果集里找 `590` 找不到。
+
+**修复**：正则加负向后顾 `(?<![A-Za-z0-9])`——数字前面紧挨着字母或数字，就不算独立数字。
+
+**另一处同类问题**：`"占比 52.31 %"` 里数字和百分号之间有空格，原来的正则匹配不到。加 `\s*` 解决。中文里数字和「年/月/日」之间也常有空格，用 `lstrip()` 后再判断后缀。
+
+### 5. 收尾时崩溃：cancel scope 在另一个任务里退出
+
+**现象**：常驻会话改完之后，跑完所有题，`close_client()` 抛 `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`。
+
+**根因**：第一次 `get_tools()` 发生在 LangGraph 的节点里，而节点跑在 Pregel 创建的子任务中；`close_client()` 却在 `asyncio.run()` 的主任务里执行。anyio 不允许跨任务关闭 cancel scope。
+
+**修复**：在 `run()` 和 `lifespan` 开头显式 `await connect()`，让连接和关闭都在主任务里。图中再调 `get_tools()` 只是取缓存，不会再建会话。
+
+**这条的教训**：**「懒加载」在异步 + 结构化并发的环境里不总是好主意。** 资源的生命周期应该由明确的边界（请求开始 / 服务启动）管理，而不是由「谁先用到」决定。
+
+### 6. 人不说负号，权重正负是两回事
+
+**现象**：E09 T2 和 E19 T2 稳定降级，答案本身完全正确。
+
+**发现**：原始回复是「西南比华北少 303.83」「比 8 月少了 2445.54」，而结果集里的差值单元格是 `-303.83`、`-2445.54`。
+
+**修复**：给每个候选值同时加上它的相反数。溯源关心的是这个数有没有出处，不是符号方向。
+
+**顺带纠正自己一个判断**：此前我把 E07 T3 的假降级归因于订单号，后来发现日期也占了一部分——**降级时 `answer` 被替换成了表格，原始措辞已经丢了**。为此给 state 加了一个 `raw_answer` 通道，专门留证据。诊断信息被修复动作覆盖掉，是一种很难察觉的自伤。
+
+### 7. 终端卡死，Ctrl+C 也出不来
+
+**现象**：评测跑到一半整个终端没反应，Ctrl+C 只打出一屏 traceback。
+
+**根因**：`get_tools()` 每次调用都新起子进程，退出时 Window 上卡在 `process.wait()`；再加上每题都要重启 `schema_server`、重做 22 块 embedding，本来就慢。
+
+**修复**：常驻会话（见设计决策 3）。修复后跑 50 题不再卡，单题耗时从十几秒降到 3 秒级。
+
+### 8. 参数加了，但没接上
+
+**现象**：`--session E07` 传进去却还是跑全部 50 题。
+
+**根因**：`main()` 里依旧调 `run(args.mode, args.turns)`，第三个参数没传。这毛病犯了两次。
+
+**这条不只是笔误**：加了参数、改了签名、忘了传——**每一处单看都"改完了"**。能拦住它的只有「跑一次并核对输出条数」，而不是「看一眼代码觉得没问题」。
+
+### 9. 指标一直是 0
+
+**现象**：`analyze_tokens_total 0.0`、`analyze_attempts_total 0.0`，但请求明明成功了。
+
+**根因**：`_record_usage()` 只加在了 `/analyze` 路由里，而页面上测试走的是 `/demo/analyze`。
+
+**修复**：两条路由各加一次。之后 metrics 立刻有数：一题约 3000 tokens。
+
+**这条和迭代 8 是同一种病**：改动只覆盖了一半的入口。项目里有两个入口（正式 / 演示）、两个客户端（HTTP / 评测脚本），任何「每个入口都要做一次」的事情都该先数清入口有几个。
+
+</details>
+
+## 许可
+
+MIT
