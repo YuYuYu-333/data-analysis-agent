@@ -3,18 +3,21 @@ FastAPI 服务层：只管 HTTP——收请求、鉴权、限流、返回。
 SQL 怎么生成、表怎么查，全在 app.graph 里，这里不碰。
 """
 
+import logging
+import time
 import secrets
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from app.checkpointer import close_checkpointer, get_checkpointer
 from app.config import API_KEY, DEBUG, ROOT
 from app.graph import analyze as run_agent
 from app.limits import API_PER_MINUTE, DEMO_PER_MINUTE, RateLimiter
-from app.logging import setup_logging
+from app.logging import request_id_var, setup_logging
 from app.mcp_client import close_client, connect, describe_tables
 from app.models import AnalyzeRequest, AnalyzeResponse
 
@@ -29,9 +32,38 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="data-analysis-agent", lifespan=lifespan)
-WEB_INDEX = ROOT / "web" / "index.html"
+logger = logging.getLogger("app.api")
 demo_limiter = RateLimiter(DEMO_PER_MINUTE)
 api_limiter = RateLimiter(API_PER_MINUTE)
+
+WEB_INDEX = ROOT / "web" / "index.html"
+REQUESTS = Counter("analyze_requests_total", "请求数", ["endpoint", "status"])
+DURATION = Histogram("analyze_duration_seconds", "请求耗时", ["endpoint"])
+TOKENS = Counter("analyze_tokens_total", "LLM token 数")
+ATTEMPTS = Counter("analyze_attempts_total", "SQL 尝试次数")
+DEGRADED = Counter("analyze_degraded_total", "答案降级次数")
+
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid4().hex[:12]
+    token = request_id_var.set(request_id)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        REQUESTS.labels(endpoint=request.url.path, status="500").inc()
+        logger.exception("request failed")
+        raise
+    else:
+        latency_ms = round((time.perf_counter() - started) * 1000, 1)
+        REQUESTS.labels(endpoint=request.url.path, status=str(response.status_code)).inc()
+        DURATION.labels(endpoint=request.url.path).observe(latency_ms / 1000)
+        response.headers["X-Request-Id"] = request_id
+        logger.info("request", extra={"latency_ms": latency_ms, "status": response.status_code})
+        return response
+    finally:
+        request_id_var.reset(token)
 
 
 def client_ip(request: Request) -> str:
@@ -66,6 +98,23 @@ def _to_response(session_id: str, state: dict) -> AnalyzeResponse:
     )
 
 
+def _record_usage(state: dict, session_id: str) -> None:
+    tokens = state.get("tokens", 0) or 0
+    attempts = state.get("attempts", 0) or 0
+    degraded = bool(state.get("degraded"))
+    TOKENS.inc(tokens)
+    ATTEMPTS.inc(attempts)
+    if degraded:
+        DEGRADED.inc()
+    logger.info("analyze done",
+                extra={"session_id": session_id,
+                       "attempts": attempts,
+                       "tokens": tokens,
+                       "citations_ok": not degraded
+                       },
+                )
+
+
 @app.get("/")
 async def index():
     return FileResponse(WEB_INDEX)
@@ -97,10 +146,14 @@ async def ready():
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_endpoint(
         req: AnalyzeRequest,
+        request: Request,
         _: None = Depends(require_api_key),
 ) -> AnalyzeResponse:
+    if not api_limiter.allow("api"):
+        raise HTTPException(status_code=429, detail="请求太频繁, 请稍后再试")
     session_id = req.session_id or uuid4().hex
     state = await run_agent(req.question, session_id=session_id, schema_mode="rag")
+    _record_usage(state, session_id)
     return _to_response(session_id, state)
 
 
@@ -111,4 +164,10 @@ async def demo_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeResponse
         raise HTTPException(status_code=429, detail="请求太繁忙,请稍后再试")
     session_id = req.session_id or uuid4().hex
     state = await run_agent(req.question, session_id=session_id, schema_mode="rag")
+    _record_usage(state, session_id)
     return _to_response(session_id, state)
+
+
+@app.get("/metrics")
+async def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

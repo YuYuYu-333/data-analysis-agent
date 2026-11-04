@@ -100,3 +100,20 @@ def test_different_ips_have_separate_quota(client, monkeypatch):
     third = client.post("/demo/analyze", json={"question": "x"}, headers={"X-Forwarded-For": "1.1.1.1"})
     assert [first.status_code, second.status_code,
             third.status_code] == [200, 200, 429]
+
+
+def test_response_has_request_id_header(client):
+    response = client.get("/health")
+    assert response.headers["x-request-id"]
+
+
+def test_metrics_endpoint(client):
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "analyze_requests_total" in response.text
+
+
+def test_index_serves_html(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]

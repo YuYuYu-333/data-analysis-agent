@@ -23,3 +23,4 @@ class AnalysisState(TypedDict, total=False):
     citations: list[dict]
     degraded: bool
     trace: Annotated[list[str], operator.add]
+    tokens: Annotated[int, operator.add]

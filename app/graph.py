@@ -102,6 +102,7 @@ async def generate_sql(state: AnalysisState) -> dict:
             "sql": sql,
             "attempts": attempts,
             "trace": [f"sql generated (attempt {attempts})"],
+            "tokens": getattr(response.usage, "total_tokens", 0) or 0,
         }
     except Exception as exc:
         return {
@@ -199,6 +200,7 @@ async def build_answer(state: AnalysisState) -> dict:
         "degraded": False,
         "history": history,
         "trace": ["answer generated"],
+        "tokens": getattr(response.usage, "total_tokens", 0) or 0,
     }
 
 
@@ -281,6 +283,7 @@ async def analyze(question: str, session_id: str = "default", schema_mode: str =
         "schema_mode": schema_mode,
         "attempts": 0,
         "error": None,
+        "tokens": 0,
         "trace": [],
     }
     config = {"configurable": {"thread_id": session_id}}
