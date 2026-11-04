@@ -14,6 +14,7 @@ from datetime import datetime
 
 from app.checkpointer import close_checkpointer
 from app.graph import analyze
+from app.mcp_client import close_client, connect
 from eval.judge import rows_match
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +56,8 @@ def summarize(mode: str, results: list[dict]) -> dict:
         rows = [r for r in results if r["level"] == level]
         hits = sum(1 for r in rows if r["correct"])
         by_level[level] = {"total": len(rows), "correct": hits, "rate": rate(hits, len(rows))}
+        answered = [r for r in results if r["row_count"] > 0]
+        degraded = [r for r in answered if r["degraded"]]
 
     return {
         "mode": mode,
@@ -69,6 +72,9 @@ def summarize(mode: str, results: list[dict]) -> dict:
         "coref_rate": rate(len(multi_correct), len(multi)),
         "by_level": by_level,
         "details": results,
+        "answered": len(answered),
+        "citation_rate": rate(len(answered) - len(degraded), len(answered)),
+        "degrade_rate": rate(len(degraded), len(answered)),
     }
 
 
@@ -76,6 +82,7 @@ async def run(mode: str, turns: str, session: str | None = None) -> dict:
     questions = load_questions(turns, session)
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     results = []
+    await connect()
 
     for item in questions:
         state = await analyze(
@@ -95,12 +102,19 @@ async def run(mode: str, turns: str, session: str | None = None) -> dict:
                 "correct": correct,
                 "sql": state.get("sql"),
                 "error": state.get("error"),
+                "row_count": len(state.get("rows") or []),
+                "degraded": state.get("degraded", False),
+                "citations": state.get("citations") or [],
+                "answer": state.get("answer") or "",
+                "raw_answer": state.get("raw_answer") or "",
             }
         )
         print(
             f"{item['session_id']} T{item['turn']} {item['level']:6}"
             f"attempts={state.get('attempts', 0)} correct = {correct}"
+            f"degraded={state.get('degraded', False)}"
         )
+    await close_client()
     await close_checkpointer()
     return summarize(mode, results)
 

@@ -7,6 +7,7 @@ import re
 
 from langgraph.graph import END, START, StateGraph
 
+from app.answer import find_citations, format_table
 from app.checkpointer import get_checkpointer, close_checkpointer
 from app.llm import CHAT_MODEL, chat_client
 from app.mcp_client import execute_sql as mcp_execute_sql
@@ -27,6 +28,14 @@ SYSTEM_PROMPT = """你是 SQLite 数据分析助手. 根据给定的表结构和
     3. 如果提供了上次错误，根据错误修正，不要重复同一个错误。
     4. 结果列要有稳定排序；排名题用 ORDER BY 指标 DESC, 名称 ASC。
     5. 这是多轮对话：新问题没有重新限定时间时，必须沿用上一轮SQL 的时间范围；其他筛选条件（大区 / 渠道 / 品类 / 状态）同理，除非新问题明确改掉或扩大范围。
+    """
+
+ANSWER_PROMPT = """你是数据分析助手。根据查询结果，用一句中文回答用户的问题。
+规则：
+    1. 只使用查询结果里出现的数字，不要自己算新的数。
+    2. 不要提"查询结果""表格"这些词，直接给结论。
+    3. 结果有多行时，挑最关键的说明，不要逐行念。
+    4. 一句话，不超过 80 字。
     """
 
 
@@ -139,35 +148,84 @@ def route(state: AnalysisState) -> str:
     return "answer"
 
 
-def build_answer(state: AnalysisState) -> dict:
+async def build_answer(state: AnalysisState) -> dict:
     columns = state.get("columns") or []
     rows = state.get("rows") or []
-
-    if not rows:
-        answer = "没有查到符合条件的数据。"
-    else:
-        lines = [" | ".join(columns)]
-        for row in rows[:20]:
-            lines.append(" | ".join("" if value is None else str(value) for value in row))
-        if len(rows) > 20:
-            lines.append(f"...（共 {len(rows)}行，仅显示前 20 行）")
-        answer = "\n".join(lines)
 
     history = list(state.get("history") or [])
     history.append({"question": state.get("question", ""), "sql": state.get("sql", "")})
     history = history[-2:]
 
+    if not rows:
+        return {
+            "answer": "没有查到符合条件的数据。",
+            "raw_answer": None,
+            "citations": [],
+            "degraded": False,
+            "history": history,
+            "trace": ["answer: empty result"],
+        }
+
+    table = format_table(columns, rows)
+    prompt = f"""
+    用户问题: {state['question']}
+    查询结构: {table}
+    """
+
+    try:
+        response = await chat_client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": ANSWER_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+        )
+        answer = (response.choices[0].message.content or "").strip() or table
+    except Exception as exc:
+        return {
+            "answer": table,
+            "raw_answer": None,
+            "citations": [],
+            "degraded": True,
+            "history": history,
+            "trace": [f"answer llm error: {exc}"],
+        }
+
     return {
         "answer": answer,
+        "raw_answer": answer,
         "citations": [],
         "degraded": False,
         "history": history,
-        "trace": ["answer built"],
+        "trace": ["answer generated"],
     }
 
 
 def verify_citations(state: AnalysisState) -> dict:
-    return {"trace": ["citations checked (stub)"]}
+    rows = state.get("rows") or []
+    if not rows:
+        return {"degraded": False, "trace": ["citations: no rows"]}
+
+    columns = state.get("columns") or []
+    citations, missing = find_citations(
+        state.get("answer") or "",
+        columns,
+        rows,
+        state.get("question", ""),
+    )
+    if missing:
+        return {
+            "answer": format_table(columns, rows),
+            "citations": [],
+            "degraded": True,
+            "trace": [f"citations: {len(missing)} unmatched -> degraded"],
+        }
+    return {
+        "citations": citations,
+        "degraded": False,
+        "trace": [f"citations: {len(citations)} ok"],
+    }
 
 
 def give_up(state: AnalysisState) -> dict:

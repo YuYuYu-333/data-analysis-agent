@@ -19,6 +19,7 @@ class AnalysisState(TypedDict, total=False):
     rows: list[list] | None
     truncated: bool
     answer: str | None
+    raw_answer: str | None
     citations: list[dict]
     degraded: bool
     trace: Annotated[list[str], operator.add]
