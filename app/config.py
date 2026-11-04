@@ -18,6 +18,10 @@ SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
 CHECKPOINT_DB = Path(os.getenv("CHECKPOINT_DB") or ROOT / "data" / "checkpoints.db")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# 服务层
+API_KEY = os.getenv("API_KEY")
+DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
+
 
 def _require(name: str, value: str | None) -> None:
     if not value:

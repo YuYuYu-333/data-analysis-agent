@@ -1,0 +1,63 @@
+"""
+API 层：健康检查、鉴权、参数校验。
+"""
+
+import pytest
+from fastapi.testclient import TestClient
+
+import app.api as api
+
+
+@pytest.fixture
+def client():
+    # 不写 with：不触发 lifespan，就不拉 MCP 子进程、不碰真模型
+    return TestClient(api.app)
+
+
+def test_health(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_analyze_without_configured_key_returns_503(client, monkeypatch):
+    monkeypatch.setattr(api, "API_KEY", None)
+    response = client.post("/analyze", json={"question": "销售额"})
+    assert response.status_code == 503
+
+
+def test_analyze_with_wrong_key_returns_401(client, monkeypatch):
+    monkeypatch.setattr(api, "API_KEY", "secret")
+    response = client.post(
+        "/analyze", json={"question": "销售额"},
+        headers={"X-API-Key": "nope"})
+    assert response.status_code == 401
+
+
+def test_analyze_with_right_key_returns_answer(client, monkeypatch):
+    monkeypatch.setattr(api, "API_KEY", "secret")
+
+    async def fake_agent(question, session_id, schema_mode):
+        return {
+            "answer": "华东 24884.15",
+            "columns": ["sales_amount"],
+            "rows": [[24884.15]],
+            "citations": [{"value": 24884.15, "row": 0, "column": "sales_amount"}],
+            "attempts": 1,
+            "degraded": False,
+        }
+
+    monkeypatch.setattr(api, "run_agent", fake_agent)
+    response = client.post(
+        "/analyze", json={"question": "销售额"},
+        headers={"X-API-Key": "secret"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["row_count"] == 1
+    assert body["answer"] == "华东 24884.15"
+    assert body["degraded"] is False
+
+
+def test_empty_question_is_rejected(client):
+    response = client.post("/demo/analyze", json={"question": ""})
+    assert response.status_code == 422
