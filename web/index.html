@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据分析助手</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 15px/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #f6f7f9;
+    color: #1f2328;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 24px 16px 104px; }
+  header { display: flex; align-items: baseline; gap: 12px; }
+  h1 { font-size: 18px; margin: 0; }
+  header button {
+    margin-left: auto; padding: 6px 12px; font-size: 13px;
+    border: 1px solid #d1d5db; border-radius: 8px; background: #fff; cursor: pointer;
+  }
+  .sub { color: #6b7280; font-size: 13px; margin: 4px 0 20px; }
+  .msg { margin-bottom: 16px; }
+  .who { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+  .bubble {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
+    padding: 12px 14px; white-space: pre-wrap; word-break: break-word;
+  }
+  .me .bubble { background: #eef2ff; border-color: #c7d2fe; }
+  .err { color: #b91c1c; }
+  table { border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 13px; }
+  th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; }
+  th { background: #f9fafb; font-weight: 600; }
+  .meta { font-size: 12px; color: #6b7280; margin-top: 8px; }
+  form {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    background: #fff; border-top: 1px solid #e5e7eb; padding: 12px 16px;
+  }
+  .row { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
+  input[type=text] {
+    flex: 1; padding: 10px 12px; font-size: 15px;
+    border: 1px solid #d1d5db; border-radius: 8px;
+  }
+  input[type=text]:focus { outline: 2px solid #bfdbfe; border-color: #93c5fd; }
+  button[type=submit] {
+    padding: 10px 20px; font-size: 15px; border: 0; border-radius: 8px;
+    background: #2563eb; color: #fff; cursor: pointer;
+  }
+  button[type=submit]:disabled { background: #9ca3af; cursor: default; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>数据分析助手</h1>
+    <button id="reset" type="button">新会话</button>
+  </header>
+  <div class="sub">问零售数据，支持追问。例如：2026 年 9 月华东大区的销售额是多少？</div>
+  <div id="log"></div>
+</div>
+
+<form id="form">
+  <div class="row">
+    <input id="q" type="text" maxlength="500" placeholder="输入问题…" autocomplete="off">
+    <button id="btn" type="submit">发送</button>
+  </div>
+</form>
+
+<script>
+const log = document.getElementById("log");
+const form = document.getElementById("form");
+const input = document.getElementById("q");
+const btn = document.getElementById("btn");
+
+function addMessage(who, text) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg" + (who === "你" ? " me" : "");
+  const label = document.createElement("div");
+  label.className = "who";
+  label.textContent = who;
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+  wrap.append(label, bubble);
+  log.appendChild(wrap);
+  window.scrollTo(0, document.body.scrollHeight);
+  return bubble;
+}
+
+function appendTable(bubble, columns, rows) {
+  const table = document.createElement("table");
+  const head = document.createElement("tr");
+  columns.forEach(function (name) {
+    const th = document.createElement("th");
+    th.textContent = name;
+    head.appendChild(th);
+  });
+  const thead = document.createElement("thead");
+  thead.appendChild(head);
+  const tbody = document.createElement("tbody");
+  rows.slice(0, 20).forEach(function (row) {
+    const tr = document.createElement("tr");
+    row.forEach(function (value) {
+      const td = document.createElement("td");
+      td.textContent = value === null ? "" : value;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.append(thead, tbody);
+  bubble.appendChild(table);
+}
+
+async function ask(question) {
+  addMessage("你", question);
+  const bubble = addMessage("助手", "…");
+  btn.disabled = true;
+  try {
+    const response = await fetch("/demo/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question: question,
+        session_id: localStorage.getItem("session_id")
+      })
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      bubble.textContent = "请求失败（" + response.status + "）：" + (data.detail || "未知错误");
+      bubble.classList.add("err");
+      return;
+    }
+
+    localStorage.setItem("session_id", data.session_id);
+    bubble.textContent = data.degraded ? "" : (data.answer || "（没有答案）");
+    if (data.columns.length && data.rows.length) {
+      appendTable(bubble, data.columns, data.rows);
+    }
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = "尝试 " + data.attempts + " 次 · 溯源 " + data.citations.length + " 条"
+      + (data.degraded ? " · 已降级为表格" : "");
+    bubble.appendChild(meta);
+  } catch (error) {
+    bubble.textContent = "网络错误，请重试";
+    bubble.classList.add("err");
+  } finally {
+    btn.disabled = false;
+    input.focus();
+  }
+}
+
+form.addEventListener("submit", function (event) {
+  event.preventDefault();
+  const question = input.value.trim();
+  if (!question) return;
+  input.value = "";
+  ask(question);
+});
+
+document.getElementById("reset").addEventListener("click", function () {
+  localStorage.removeItem("session_id");
+  log.innerHTML = "";
+  input.focus();
+});
+</script>
+</body>
+</html>

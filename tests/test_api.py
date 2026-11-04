@@ -61,3 +61,42 @@ def test_analyze_with_right_key_returns_answer(client, monkeypatch):
 def test_empty_question_is_rejected(client):
     response = client.post("/demo/analyze", json={"question": ""})
     assert response.status_code == 422
+
+
+def test_demo_rate_limit_returns_429(client, monkeypatch):
+    monkeypatch.setattr(api, "demo_limiter", api.RateLimiter(2))
+
+    async def fake_agent(question, session_id, schema_mode):
+        return {
+            "answer": "ok",
+            "columns": [],
+            "rows": [],
+            "citations": [],
+            "attempts": 1,
+            "degraded": False
+        }
+
+    monkeypatch.setattr(api, "run_agent", fake_agent)
+    codes = [client.post("/demo/analyze", json={"question": "x"}).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
+
+
+def test_different_ips_have_separate_quota(client, monkeypatch):
+    monkeypatch.setattr(api, "demo_limiter", api.RateLimiter(1))
+
+    async def fake_agent(question, session_id, schema_mode):
+        return {
+            "answer": "ok",
+            "columns": [],
+            "rows": [],
+            "citations": [],
+            "attempts": 1,
+            "degraded": False
+        }
+
+    monkeypatch.setattr(api, "run_agent", fake_agent)
+    first = client.post("/demo/analyze", json={"question": "x"}, headers={"X-Forwarded-For": "1.1.1.1"})
+    second = client.post("/demo/analyze", json={"question": "x"}, headers={"X-Forwarded-For": "2.2.2.2"})
+    third = client.post("/demo/analyze", json={"question": "x"}, headers={"X-Forwarded-For": "1.1.1.1"})
+    assert [first.status_code, second.status_code,
+            third.status_code] == [200, 200, 429]
