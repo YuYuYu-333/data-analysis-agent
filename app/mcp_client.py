@@ -84,7 +84,10 @@ async def search_schema(query: str, top_k: int = 3) -> dict:
 
 async def execute_sql(sql: str) -> dict:
     tools = await get_tools()
-    raw = await tools["execute_readonly_sql"].ainvoke({"sql": sql})
+    try:
+        raw = await tools["execute_readonly_sql"].ainvoke({"sql": sql})
+    except Exception:
+        raw = await tools["execute_readonly_sql"].ainvoke({"sql": sql})
     return _parse_result(raw)
 
 

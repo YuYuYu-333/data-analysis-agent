@@ -26,6 +26,7 @@ SYSTEM_PROMPT = """你是 SQLite 数据分析助手. 根据给定的表结构和
     2. 只允许 SELECT 或 WITH 开头的只读查询。
     3. 如果提供了上次错误，根据错误修正，不要重复同一个错误。
     4. 结果列要有稳定排序；排名题用 ORDER BY 指标 DESC, 名称 ASC。
+    5. 这是多轮对话：新问题没有重新限定时间时，必须沿用上一轮SQL 的时间范围；其他筛选条件（大区 / 渠道 / 品类 / 状态）同理，除非新问题明确改掉或扩大范围。
     """
 
 
@@ -72,7 +73,7 @@ async def generate_sql(state: AnalysisState) -> dict:
 
     prompt = f"""
     表结构与业务口径:{state.get('schema_context', '')}
-    最近两轮：{history_text}
+    最近两轮（追问时默认继承它们的时间范围和筛选条件）：{history_text}
     上次 SQL 错误： {state.get('error') or '无'}
     用户问题：{state['question']}
     只输出一条 SQLite SQL.
@@ -103,7 +104,16 @@ async def generate_sql(state: AnalysisState) -> dict:
 
 
 async def execute_sql_node(state: AnalysisState) -> dict:
-    result = await mcp_execute_sql(state.get("sql", ""))
+    try:
+        result = await mcp_execute_sql(state.get("sql", ""))
+    except Exception as exc:
+        return {
+            "error": f"数据库服务不可用：{exc}",
+            "columns": None,
+            "rows": None,
+            "truncated": False,
+            "trace": [f"mcp error: {exc}"],
+        }
     if "error" in result:
         return {
             "error": result["error"],
@@ -212,6 +222,7 @@ async def analyze(question: str, session_id: str = "default", schema_mode: str =
         "session_id": session_id,
         "schema_mode": schema_mode,
         "attempts": 0,
+        "error": None,
         "trace": [],
     }
     config = {"configurable": {"thread_id": session_id}}

@@ -43,3 +43,11 @@ def test_money_rounding_matches_reference_precision():
 
 def test_rate_rounding_matches_reference_precision():
     assert rows_match([[0.09255079]], [[0.0926]])
+
+
+def test_candidate_may_have_extra_columns():
+    assert rows_match([["毛巾", 100]], [["P01", "毛巾", 100]])
+
+
+def test_candidate_missing_a_value_fails():
+    assert not rows_match([["P01", "毛巾", 100]], [["毛巾", 100]])

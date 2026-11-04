@@ -7,7 +7,7 @@
 *.db-wal
 *.db-shm
 schema_index.json
-eval/raw.json
+eval/raw*.json
 
 # 本地笔记,不进仓库
 PLAN.md

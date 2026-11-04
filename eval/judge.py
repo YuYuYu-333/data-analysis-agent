@@ -29,15 +29,17 @@ def _normalize_value(value: Any) -> tuple:
     return ("other", repr(value))
 
 
-def _sort_key(item: tuple) -> tuple:
-    kind, value = item
-    if kind == "num":
-        return (0, value)
-    if kind == "str":
-        return (1, value)
-    if kind == "null":
-        return (2, "")
-    return (3, value)
+def _row_contains(reference_row: list[Any],candidate_row: list[Any]) -> bool:
+    """候选行必须包含参考行里的每个值；候选允许有多余的列"""
+    remaining = [_normalize_value(v) for v in candidate_row]
+    for ref_value in (_normalize_value(v) for v in reference_row):
+        for index, cand_value in enumerate(remaining):
+            if _value_equal(ref_value, cand_value):
+                remaining.pop(index)
+                break
+        else:
+            return False
+        return True
 
 
 def _value_equal(left: tuple, right: tuple) -> bool:
@@ -47,15 +49,6 @@ def _value_equal(left: tuple, right: tuple) -> bool:
     if left[0] == "num":
         return math.isclose(left[1], right[1], rel_tol=FLOAT_TOL, abs_tol=FLOAT_TOL)
     return left == right
-
-
-def _row_equal(left: list[Any], right: list[Any]) -> bool:
-    """行内列顺序不敏感：两行的值排序后逐项比较。"""
-    if len(left) != len(right):
-        return False
-    a = sorted((_normalize_value(v) for v in left), key=_sort_key)
-    b = sorted((_normalize_value(v) for v in right), key=_sort_key)
-    return all(_value_equal(x, y) for x, y in zip(a, b))
 
 
 def rows_match(reference: list[list[Any]], candidate: list[list[Any]], ordered: bool = False) -> bool:
@@ -68,12 +61,12 @@ def rows_match(reference: list[list[Any]], candidate: list[list[Any]], ordered: 
         return False
 
     if ordered:
-        return all(_row_equal(a, b) for a, b in zip(reference, candidate))
+        return all(_row_contains(a, b) for a, b in zip(reference, candidate))
 
     remaining = list(candidate)
     for ref_row in reference:
         for index, cand_row in enumerate(remaining):
-            if _row_equal(ref_row, cand_row):
+            if _row_contains(ref_row, cand_row):
                 remaining.pop(index)
                 break
         else:
