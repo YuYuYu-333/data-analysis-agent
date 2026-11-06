@@ -20,6 +20,7 @@ from app.limits import API_PER_MINUTE, DEMO_PER_MINUTE, RateLimiter
 from app.logging import request_id_var, setup_logging
 from app.mcp_client import close_client, connect, describe_tables
 from app.models import AnalyzeRequest, AnalyzeResponse
+from app.session_lock import SessionLocks
 
 
 @asynccontextmanager
@@ -35,6 +36,7 @@ app = FastAPI(title="data-analysis-agent", lifespan=lifespan)
 logger = logging.getLogger("app.api")
 demo_limiter = RateLimiter(DEMO_PER_MINUTE)
 api_limiter = RateLimiter(API_PER_MINUTE)
+session_locks = SessionLocks()
 
 WEB_INDEX = ROOT / "web" / "index.html"
 REQUESTS = Counter("analyze_requests_total", "请求数", ["endpoint", "status"])
@@ -143,6 +145,12 @@ async def ready():
     return JSONResponse(status_code=200 if ok else 503, content={"ready": ok, "checks": checks})
 
 
+async def run_session(question: str, session_id: str) -> dict:
+    """同一个 session_id 串行执行，不同会话互不阻塞。"""
+    async with session_locks.hold(session_id):
+        return await run_agent(question, session_id=session_id, schema_mode="rag")
+
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_endpoint(
         req: AnalyzeRequest,
@@ -152,7 +160,7 @@ async def analyze_endpoint(
     if not api_limiter.allow("api"):
         raise HTTPException(status_code=429, detail="请求太频繁, 请稍后再试")
     session_id = req.session_id or uuid4().hex
-    state = await run_agent(req.question, session_id=session_id, schema_mode="rag")
+    state = await run_session(req.question, session_id=session_id)
     _record_usage(state, session_id)
     return _to_response(session_id, state)
 
@@ -163,7 +171,7 @@ async def demo_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeResponse
     if not demo_limiter.allow(client_ip(request)):
         raise HTTPException(status_code=429, detail="请求太繁忙,请稍后再试")
     session_id = req.session_id or uuid4().hex
-    state = await run_agent(req.question, session_id=session_id, schema_mode="rag")
+    state = await run_session(req.question, session_id=session_id)
     _record_usage(state, session_id)
     return _to_response(session_id, state)
 
