@@ -6,6 +6,10 @@
 
 多轮追问会继承上文："那华南呢？"这句话里既没有时间也没有指标，系统照样答出华南 9 月的销售额。
 
+**在线演示**：<https://data-analysis-agent-9q2v.onrender.com>　Render 免费层，15 分钟无请求会休眠，首次访问需等待约 50 秒冷启动。
+
+![在线演示](docs/demo.png)
+
 - **六节点图**：`retrieve_schema → generate_sql → execute_sql → route → build_answer → verify_citations`，出错回填重试，硬上限 3 次
 - **多轮**：`AsyncSqliteSaver` 按 `session_id` 持久化，最近两轮 `(问题, SQL)` 进 prompt
 - **数字溯源**：回答里的每个数字都要在结果单元格里找到出处，否则整段降级为表格
