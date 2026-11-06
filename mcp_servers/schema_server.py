@@ -12,6 +12,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from app.llm import EMBED_MODEL, embed_client
+from app.rerank import rerank
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "data" / "schema.md"
@@ -28,21 +29,7 @@ mcp = FastMCP("schema-server")
 _chunks: list[dict] | None = None
 _vectors: list[list[float]] | None = None
 
-METRIC_HINTS = {
-    "销售额": "8.1",
-    "订单数": "8.2",
-    "客单价": "8.3",
-    "退款率": "8.4",
-    "环比": "8.5",
-    "上月": "8.6",
-    "本月": "8.6",
-    "退款金额": "8.7",
-    "退款订单": "8.7",
-    "取消率": "8.7",
-    "销售件数": "8.7",
-    "占比": "8.7",
-}
-
+_CANDIDATES = 10
 
 def split_sections(text: str) -> list[dict]:
     """按 ## / ### 标题切块，每块保留标题和正文"""
@@ -85,21 +72,6 @@ def rank(
     return [chunk for _, chunk in scored[:top_k]]
 
 
-def apply_hints(query: str, ranked: list[dict], top_k: int) -> list[dict]:
-    """按问题里的指标关键词，把关键小节强制放进结果."""
-    result = list(ranked[:top_k])
-    present = {item["section"] for item in result}
-    for keyword, prefix in METRIC_HINTS.items():
-        if keyword not in query:
-            continue
-        for chunk in _chunks or []:
-            if chunk["section"].startswith(prefix) and chunk["section"] not in present:
-                result.insert(0, chunk)
-                present.add(chunk["section"])
-                break
-    return result[:top_k]
-
-
 def _ensure_index() -> None:
     global _chunks, _vectors
     if _chunks is not None and _vectors is not None:
@@ -128,8 +100,16 @@ def search_schema(query: str, top_k: int = 3) -> dict:
         input=[query]
     )
     query_vector = response.data[0].embedding
-    ranked = rank(query_vector, _vectors, _chunks, top_k)
-    return {"chunks": apply_hints(query, ranked, top_k)}
+    candidates = rank(query_vector, _vectors, _chunks, _CANDIDATES)
+
+    try:
+        scores = rerank(query, [chunk["text"] for chunk in candidates])
+    except Exception:
+        logger.warning("rerank failed, fallback to vector order", exc_info=True)
+        return {"chunks": candidates[:top_k]}
+
+    ordered = sorted(zip(scores, candidates), key=lambda item: item[0], reverse=True)
+    return {"chunks": [chunk for _, chunk in ordered][:top_k]}
 
 
 if __name__ == '__main__':

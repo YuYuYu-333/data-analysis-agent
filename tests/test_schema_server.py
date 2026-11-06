@@ -1,8 +1,9 @@
 """Schema MCP Server：切块、余弦与排序。"""
 
+import types
+
 from mcp_servers import schema_server
 from mcp_servers.schema_server import SCHEMA_PATH, cosine, rank, split_sections
-from mcp_servers.schema_server import apply_hints
 
 
 def test_split_sections_keeps_headers_and_body():
@@ -36,20 +37,39 @@ def test_real_schema_has_sections():
     assert any("指标口径" in c["section"] for c in chunks)
 
 
-def test_apply_hints_adds_sales_section(monkeypatch):
-    chunks = [
-        {"section": "8.1 销售额", "text": "销售额口径"},
-        {"section": "6.1 region（大区）", "text": "大区"},
-    ]
-    monkeypatch.setattr(schema_server, "_chunks", chunks)
-    ranked = [{"section": "6.1 region（大区）", "text": "大区"}]
-    result = apply_hints("销售额是多少", ranked, 2)
-    assert result[0]["section"] == "8.1 销售额"
+def _fake_client(vector):
+    class _Embeddings:
+        def create(self, **kwargs):
+            return types.SimpleNamespace(
+                data=[types.SimpleNamespace(embedding=vector)]
+            )
+
+    return types.SimpleNamespace(embeddings=_Embeddings())
 
 
-def test_apply_hints_does_not_duplicate(monkeypatch):
-    chunks = [{"section": "8.1 销售额", "text": "销售额口径"}]
+def _prepare(monkeypatch, vector):
+    chunks = [{"section": "a", "text": "A"},
+              {"section": "b", "text": "B"}]
+    vectors = [[1.0, 0.0], [0.0, 1.0]]
     monkeypatch.setattr(schema_server, "_chunks", chunks)
-    ranked = [{"section": "8.1 销售额", "text": "销售额口径"}]
-    result = apply_hints("销售额", ranked, 1)
-    assert len(result) == 1
+    monkeypatch.setattr(schema_server, "_vectors", vectors)
+    monkeypatch.setattr(schema_server, "_ensure_index", lambda: None)
+    monkeypatch.setattr(schema_server, "embed_client", _fake_client(vector))
+
+
+def test_search_schema_uses_rerank_order(monkeypatch):
+    _prepare(monkeypatch, [1.0, 0.0])
+    monkeypatch.setattr(schema_server, "rerank", lambda query, docs: [0.1, 0.9])
+    result = schema_server.search_schema("问题", top_k=2)
+    assert [c["section"] for c in result["chunks"]] == ["b", "a"]
+
+
+def test_search_schema_falls_back_when_rerank_fails(monkeypatch):
+    _prepare(monkeypatch, [1.0, 0.0])
+
+    def boom(query, docs):
+        raise RuntimeError("rerank down")
+
+    monkeypatch.setattr(schema_server, "rerank", boom)
+    result = schema_server.search_schema("问题", top_k=2)
+    assert [c["section"] for c in result["chunks"]] == ["a", "b"]
