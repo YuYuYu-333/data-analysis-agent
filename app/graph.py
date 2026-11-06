@@ -4,6 +4,7 @@ LangGraph 图：检索 schema → 生成 SQL → 执行 → 重试/出答案。
 """
 
 import re
+from collections.abc import AsyncIterator
 
 from langgraph.graph import END, START, StateGraph
 
@@ -276,8 +277,8 @@ async def get_graph():
     return _graph
 
 
-async def analyze(question: str, session_id: str = "default", schema_mode: str = "rag") -> dict:
-    state: AnalysisState = {
+def _initial_state(question: str, session_id: str, schema_mode: str) -> AnalysisState:
+    return {
         "question": question,
         "session_id": session_id,
         "schema_mode": schema_mode,
@@ -286,9 +287,26 @@ async def analyze(question: str, session_id: str = "default", schema_mode: str =
         "tokens": 0,
         "trace": [],
     }
-    config = {"configurable": {"thread_id": session_id}}
+
+
+async def analyze(question: str, session_id: str = "default", schema_mode: str = "rag") -> dict:
     graph = await get_graph()
-    return await graph.ainvoke(state, config=config)
+    config = {"configurable": {"thread_id": session_id}}
+    return await graph.ainvoke(_initial_state(question, session_id, schema_mode), config=config)
+
+
+async def analyze_stream(question: str, session_id: str = "default", schema_mode: str = "rag") -> AsyncIterator[dict]:
+    """逐节点产出进度，结束时产出一份完整 state。"""
+    graph = await get_graph()
+    config = {"configurable": {"thread_id": session_id}}
+    initial = _initial_state(question, session_id, schema_mode)
+
+    async for update in graph.astream(initial, config=config, stream_mode="updates"):
+        for node in update:
+            yield {"type": "step", "node": node}
+
+    snapshot = await graph.aget_state(config)
+    yield {"type": "final", "state": snapshot.values}
 
 
 if __name__ == '__main__':

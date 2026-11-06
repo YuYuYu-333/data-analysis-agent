@@ -32,6 +32,8 @@
   th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; }
   th { background: #f9fafb; font-weight: 600; }
   .meta { font-size: 12px; color: #6b7280; margin-top: 8px; }
+  .steps { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+  .step { line-height: 1.5; }
   form {
     position: fixed; left: 0; right: 0; bottom: 0;
     background: #fff; border-top: 1px solid #e5e7eb; padding: 12px 16px;
@@ -111,12 +113,30 @@ function appendTable(bubble, columns, rows) {
   bubble.appendChild(table);
 }
 
+function renderFinal(bubble, data) {
+  localStorage.setItem("session_id", data.session_id);
+  const answer = document.createElement("div");
+  answer.textContent = data.degraded ? "" : (data.answer || "（没有答案）");
+  bubble.appendChild(answer);
+  if (data.columns.length && data.rows.length) {
+    appendTable(bubble, data.columns, data.rows);
+  }
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = "尝试 " + data.attempts + " 次 · 溯源 " + data.citations.length + " 条"
+    + (data.degraded ? " · 已降级为表格" : "");
+  bubble.appendChild(meta);
+}
+
 async function ask(question) {
   addMessage("你", question);
-  const bubble = addMessage("助手", "…");
+  const bubble = addMessage("助手", "");
+  const steps = document.createElement("div");
+  steps.className = "steps";
+  bubble.appendChild(steps);
   btn.disabled = true;
   try {
-    const response = await fetch("/demo/analyze", {
+    const response = await fetch("/demo/analyze/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -124,24 +144,41 @@ async function ask(question) {
         session_id: localStorage.getItem("session_id")
       })
     });
-    const data = await response.json();
 
     if (!response.ok) {
+      const data = await response.json().catch(function () { return {}; });
       bubble.textContent = "请求失败（" + response.status + "）：" + (data.detail || "未知错误");
       bubble.classList.add("err");
       return;
     }
 
-    localStorage.setItem("session_id", data.session_id);
-    bubble.textContent = data.degraded ? "" : (data.answer || "（没有答案）");
-    if (data.columns.length && data.rows.length) {
-      appendTable(bubble, data.columns, data.rows);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop();
+      frames.forEach(function (frame) {
+        const line = frame.trim();
+        if (!line.startsWith("data:")) return;
+        const event = JSON.parse(line.slice(5).trim());
+        if (event.type === "step") {
+          const step = document.createElement("div");
+          step.className = "step";
+          step.textContent = "· " + event.label;
+          steps.appendChild(step);
+        } else if (event.type === "final") {
+          renderFinal(bubble, event);
+        } else if (event.type === "error") {
+          bubble.classList.add("err");
+          bubble.textContent = "出错了：" + event.detail;
+        }
+      });
+      window.scrollTo(0, document.body.scrollHeight);
     }
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = "尝试 " + data.attempts + " 次 · 溯源 " + data.citations.length + " 条"
-      + (data.degraded ? " · 已降级为表格" : "");
-    bubble.appendChild(meta);
   } catch (error) {
     bubble.textContent = "网络错误，请重试";
     bubble.classList.add("err");

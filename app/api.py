@@ -3,6 +3,7 @@ FastAPI 服务层：只管 HTTP——收请求、鉴权、限流、返回。
 SQL 怎么生成、表怎么查，全在 app.graph 里，这里不碰。
 """
 
+import json
 import logging
 import time
 import secrets
@@ -10,12 +11,12 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from app.checkpointer import close_checkpointer, get_checkpointer
 from app.config import API_KEY, DEBUG, ROOT
-from app.graph import analyze as run_agent
+from app.graph import analyze as run_agent, analyze_stream
 from app.limits import API_PER_MINUTE, DEMO_PER_MINUTE, RateLimiter
 from app.logging import request_id_var, setup_logging
 from app.mcp_client import close_client, connect, describe_tables
@@ -44,6 +45,15 @@ DURATION = Histogram("analyze_duration_seconds", "请求耗时", ["endpoint"])
 TOKENS = Counter("analyze_tokens_total", "LLM token 数")
 ATTEMPTS = Counter("analyze_attempts_total", "SQL 尝试次数")
 DEGRADED = Counter("analyze_degraded_total", "答案降级次数")
+
+STEP_LABELS = {
+    "retrieve_schema": "检索 schema",
+    "generate_sql": "生成 SQL",
+    "execute_sql": "执行查询",
+    "build_answer": "撰写结论",
+    "verify_citations": "校验溯源",
+    "give_up": "放弃",
+}
 
 
 @app.middleware("http")
@@ -117,6 +127,42 @@ def _record_usage(state: dict, session_id: str) -> None:
                 )
 
 
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def stream_events(question: str, session_id: str):
+    async with session_locks.hold(session_id):
+        try:
+            async for event in analyze_stream(question, session_id):
+                if event["type"] == "final":
+                    state = event["state"]
+                    _record_usage(state, session_id)
+                    body = _to_response(session_id, state).model_dump()
+                    yield _sse({"type": "final", **body})
+                else:
+                    node = event["node"]
+                    yield _sse({
+                        "type": "step",
+                        "step": node,
+                        "label": STEP_LABELS.get(node, node),
+                    })
+        except Exception as exc:
+            logger.exception("stream failed")
+            yield _sse({"type": "error", "detail": str(exc)})
+
+
+def _stream_response(question: str, session_id: str) -> StreamingResponse:
+    return StreamingResponse(
+        stream_events(question, session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.get("/")
 async def index():
     return FileResponse(WEB_INDEX)
@@ -145,12 +191,6 @@ async def ready():
     return JSONResponse(status_code=200 if ok else 503, content={"ready": ok, "checks": checks})
 
 
-async def run_session(question: str, session_id: str) -> dict:
-    """同一个 session_id 串行执行，不同会话互不阻塞。"""
-    async with session_locks.hold(session_id):
-        return await run_agent(question, session_id=session_id, schema_mode="rag")
-
-
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_endpoint(
         req: AnalyzeRequest,
@@ -174,6 +214,31 @@ async def demo_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeResponse
     state = await run_session(req.question, session_id=session_id)
     _record_usage(state, session_id)
     return _to_response(session_id, state)
+
+
+async def run_session(question: str, session_id: str) -> dict:
+    """同一个 session_id 串行执行，不同会话互不阻塞。"""
+    async with session_locks.hold(session_id):
+        return await run_agent(question, session_id=session_id, schema_mode="rag")
+
+
+@app.post("/analyze/stream")
+async def analyze_stream_endpoint(
+        req: AnalyzeRequest,
+        _: None = Depends(require_api_key),
+):
+    if not api_limiter.allow("api"):
+        raise HTTPException(status_code=429, detail="请求太频繁, 请稍后再试")
+    session_id = req.session_id or uuid4().hex
+    return _stream_response(req.question, session_id)
+
+
+@app.post("/demo/analyze/stream")
+async def demo_stream_endpoint(req: AnalyzeRequest, request: Request):
+    if not demo_limiter.allow(client_ip(request)):
+        raise HTTPException(status_code=429, detail="请求太繁忙,请稍后再试")
+    session_id = req.session_id or uuid4().hex
+    return _stream_response(req.question, session_id)
 
 
 @app.get("/metrics")

@@ -319,6 +319,8 @@ schema.md  →  切成 22 块  →  bge-m3 向量化（启动时一次）  →  
 | `GET` | `/` | 无 | 单页 UI |
 | `POST` | `/demo/analyze` | 无 | 公开演示，每 IP 每分钟 5 次 |
 | `POST` | `/analyze` | `X-API-Key` | 正式接口，每分钟 30 次（单 key，全局计数） |
+| `POST` | `/demo/analyze/stream` | 无 | 同上，SSE 逐节点下发进度 |
+| `POST` | `/analyze/stream` | `X-API-Key` | 同上，SSE |
 | `GET` | `/health` | 无 | 进程存活，不检查依赖 |
 | `GET` | `/ready` | 无 | checkpointer 与 MCP 是否就绪，不可用时 503 |
 | `GET` | `/metrics` | 无 | Prometheus 文本格式 |
@@ -436,6 +438,7 @@ schema.md  →  切成 22 块  →  bge-m3 向量化（启动时一次）  →  
 | SQL 写错 | 错误回填 `generate_sql` 重试，最多 3 次 | 图的条件边 |
 | MCP 子进程崩溃 | `execute_sql_node` 接住异常 → 错误 → 重试 → 仍失败则 `give_up` | 代码路径 |
 | 同一 session 并发请求 | 排队串行执行，后一个能看到前一个的结果 | `test_same_key_is_serialized` |
+| 流式中途断开 | 生成器被取消，`async with` 的 `finally` 释放会话锁 | 代码路径 |
 | 答案里有编造的数字 | 整段降级为表格，`degraded=true` | `test_sign_flip_still_counts_as_citation` 等 11 条 |
 | 依赖挂了 | `/ready` 返回 **503**，`checks` 里指出是哪一项；`/health` 仍是 200 | 手工：停掉 MCP 后访问 |
 
@@ -452,7 +455,7 @@ schema.md  →  切成 22 块  →  bge-m3 向量化（启动时一次）  →  
 | 限流按单 key 全局计数 | 多把 key 时会互相影响 | `allow(x_api_key)` 按 key 分开 |
 | 多轮继承靠 prompt | 模型偶尔仍会丢时间范围 | 提取上一轮 SQL 的条件做查询重写 |
 | 重排在主链路上 | 每题多 0.52 秒和一次外部调用 | 候选已限制在 top-10；可换本地小模型；已做超时降级 |
-| 无流式输出 | 首字延迟等于总耗时，平均 3.5 秒 | 接 SSE，逐节点下发进度 |
+| 流式只到节点粒度 | 写 SQL 的那 2.5 秒仍是一段静默，用户看到的是"生成 SQL"停在那里 | 接 token 级流式；但答案要先过溯源校验，需要能"撤回"的 UI 设计 |
 | Render 免费层休眠 | 冷启动需要数十秒 | 保活探针（注意别因此超额），或升付费层 |
 | SQLite 检查点在容器里不持久 | 重新部署后多轮会话丢失 | 接 Neon，换 `PostgresSaver`；`DATABASE_URL` 已预留 |
 | 未做多租户 / SLO / 压测 / 告警 | 单人可用的演示级系统 | L4 的范围，不在本版本目标内 |

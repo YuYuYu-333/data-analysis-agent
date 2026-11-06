@@ -117,3 +117,29 @@ def test_index_serves_html(client):
     response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
+
+
+def test_stream_returns_sse(client, monkeypatch):
+    monkeypatch.setattr(api, "demo_limiter", api.RateLimiter(10))
+
+    async def fake_stream(question, session_id, schema_mode="rag"):
+        yield {"type": "step",
+               "node": "generate_sql"}
+        yield {"type": "final",
+               "state": {
+                   "answer": "ok",
+                   "columns": [],
+                   "rows": [],
+                   "citations": [],
+                   "attempts": 1,
+                   "degraded": False,
+               }
+               }
+
+    monkeypatch.setattr(api, "analyze_stream", fake_stream)
+    response = client.post("/demo/analyze/stream", json={"question": "x"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert '"type": "step"' in response.text
+    assert '"label": "生成 SQL"' in response.text
+    assert '"type": "final"' in response.text
