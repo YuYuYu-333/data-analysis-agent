@@ -1,0 +1,48 @@
+{"id": "r01", "query": "2026年9月华东大区的销售额是多少", "gold": "8.1 销售额", "difficulty": "easy"}
+{"id": "r02", "query": "上个月全国的总销售额", "gold": "8.1 销售额", "difficulty": "easy"}
+{"id": "r03", "query": "9 月一共卖了多少钱", "gold": "8.1 销售额", "difficulty": "hard"}
+{"id": "r04", "query": "剔除退款之后的收入是多少", "gold": "8.1 销售额", "difficulty": "hard"}
+{"id": "r05", "query": "这个月的营业额", "gold": "8.1 销售额", "difficulty": "hard"}
+{"id": "r06", "query": "退款金额要不要从销售额里再扣一次", "gold": "8.1 销售额", "difficulty": "easy"}
+{"id": "r07", "query": "9 月一共多少笔订单", "gold": "8.2 订单数", "difficulty": "easy"}
+{"id": "r08", "query": "北京门店这个月成交了多少单", "gold": "8.2 订单数", "difficulty": "easy"}
+{"id": "r09", "query": "有多少张已经完成的小票", "gold": "8.2 订单数", "difficulty": "hard"}
+{"id": "r10", "query": "下单次数应该怎么统计", "gold": "8.2 订单数", "difficulty": "hard"}
+{"id": "r11", "query": "华东大区的客单价是多少", "gold": "8.3 客单价", "difficulty": "easy"}
+{"id": "r12", "query": "平均每单花多少钱", "gold": "8.3 客单价", "difficulty": "hard"}
+{"id": "r13", "query": "一单大概多少钱", "gold": "8.3 客单价", "difficulty": "hard"}
+{"id": "r14", "query": "客单价怎么算", "gold": "8.3 客单价", "difficulty": "easy"}
+{"id": "r15", "query": "人均消费金额", "gold": "8.3 客单价", "difficulty": "hard"}
+{"id": "r16", "query": "9 月的退款率", "gold": "8.4 退款率", "difficulty": "easy"}
+{"id": "r17", "query": "发生退款的明细行占多少", "gold": "8.4 退款率", "difficulty": "hard"}
+{"id": "r18", "query": "退货的比例高不高", "gold": "8.4 退款率", "difficulty": "hard"}
+{"id": "r19", "query": "退款率的分母是什么", "gold": "8.4 退款率", "difficulty": "easy"}
+{"id": "r20", "query": "线上渠道的退款比例", "gold": "8.4 退款率", "difficulty": "easy"}
+{"id": "r21", "query": "售后出问题的比例", "gold": "8.4 退款率", "difficulty": "hard"}
+{"id": "r22", "query": "9 月销售额环比 8 月", "gold": "8.5 环比", "difficulty": "easy"}
+{"id": "r23", "query": "和上个月比涨了多少", "gold": "8.5 环比", "difficulty": "hard"}
+{"id": "r24", "query": "这个月比上个月变化了多少", "gold": "8.5 环比", "difficulty": "hard"}
+{"id": "r25", "query": "环比怎么算", "gold": "8.5 环比", "difficulty": "easy"}
+{"id": "r26", "query": "增长的百分比是多少", "gold": "8.5 环比", "difficulty": "hard"}
+{"id": "r27", "query": "本月和上月分别指哪个月", "gold": "8.6 时间口径", "difficulty": "easy"}
+{"id": "r28", "query": "订单日期怎么过滤", "gold": "8.6 时间口径", "difficulty": "easy"}
+{"id": "r29", "query": "怎么按月份统计", "gold": "8.6 时间口径", "difficulty": "hard"}
+{"id": "r30", "query": "最近一个月是几号到几号", "gold": "8.6 时间口径", "difficulty": "hard"}
+{"id": "r31", "query": "退款金额合计", "gold": "8.7 派生指标与排名", "difficulty": "easy"}
+{"id": "r32", "query": "退款订单数怎么算", "gold": "8.7 派生指标与排名", "difficulty": "easy"}
+{"id": "r33", "query": "取消率", "gold": "8.7 派生指标与排名", "difficulty": "easy"}
+{"id": "r34", "query": "占比怎么算", "gold": "8.7 派生指标与排名", "difficulty": "easy"}
+{"id": "r35", "query": "销售件数", "gold": "8.7 派生指标与排名", "difficulty": "easy"}
+{"id": "r36", "query": "销量排名前五的门店", "gold": "8.7 派生指标与排名", "difficulty": "hard"}
+{"id": "r37", "query": "华南大区包含哪些城市", "gold": "6.1 region（大区）", "difficulty": "easy"}
+{"id": "r38", "query": "渠道有哪些取值", "gold": "6.2 channel（渠道）", "difficulty": "easy"}
+{"id": "r39", "query": "已取消的订单还算不算业绩", "gold": "6.3 status（订单状态）", "difficulty": "hard"}
+{"id": "r40", "query": "商品分成几个品类", "gold": "6.4 category（品类）", "difficulty": "easy"}
+{"id": "r41", "query": "退款标记 1 代表什么", "gold": "6.5 refunded（退款标记）", "difficulty": "easy"}
+{"id": "r42", "query": "订单表有哪些字段", "gold": "4. 表 sales_order（订单头）", "difficulty": "easy"}
+{"id": "r43", "query": "明细表的 refund_amount 是什么", "gold": "5. 表 sales_item（订单明细）", "difficulty": "easy"}
+{"id": "r44", "query": "门店表和订单表怎么关联", "gold": "7. 表关系", "difficulty": "easy"}
+{"id": "r45", "query": "商品的标价存在哪里", "gold": "3. 表 product（商品）", "difficulty": "easy"}
+{"id": "r46", "query": "数据覆盖多长时间", "gold": "1. 数据概况", "difficulty": "easy"}
+{"id": "r47", "query": "这个库有哪些已知的坑", "gold": "9. 已知陷阱", "difficulty": "hard"}
+{"id": "r48", "query": "生成数据时退款的比例设成多少", "gold": "10. 数据分布（生成器的目标值）", "difficulty": "hard"}
