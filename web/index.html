@@ -89,6 +89,13 @@ function addMessage(who, text) {
   return bubble;
 }
 
+function displayValue(value) {
+  if (typeof value === "number" && !Number.isInteger(value)) {
+    return value.toFixed(2);
+  }
+  return value;
+}
+
 function appendTable(bubble, columns, rows) {
   const table = document.createElement("table");
   const head = document.createElement("tr");
@@ -104,7 +111,7 @@ function appendTable(bubble, columns, rows) {
     const tr = document.createElement("tr");
     row.forEach(function (value) {
       const td = document.createElement("td");
-      td.textContent = value === null ? "" : value;
+      td.textContent = value === null ? "" : displayValue(value);
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
