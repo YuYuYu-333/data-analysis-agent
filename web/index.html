@@ -120,10 +120,19 @@ function appendTable(bubble, columns, rows) {
   bubble.appendChild(table);
 }
 
+function addError(bubble, text) {
+  const box = document.createElement("div");
+  box.className = "err";
+  box.textContent = text;
+  bubble.appendChild(box);
+}
+
 function renderFinal(bubble, data) {
   localStorage.setItem("session_id", data.session_id);
   const answer = document.createElement("div");
-  answer.textContent = data.degraded ? "" : (data.answer || "（没有答案）");
+  answer.textContent = data.degraded
+    ? "（回答里有数字没能溯源，已降级为表格）"
+    : (data.answer || "（没有答案）");
   bubble.appendChild(answer);
   if (data.columns.length && data.rows.length) {
     appendTable(bubble, data.columns, data.rows);
@@ -154,8 +163,7 @@ async function ask(question) {
 
     if (!response.ok) {
       const data = await response.json().catch(function () { return {}; });
-      bubble.textContent = "请求失败（" + response.status + "）：" + (data.detail || "未知错误");
-      bubble.classList.add("err");
+      addError(bubble, "请求失败（" + response.status + "）：" + (data.detail || "未知错误"));
       return;
     }
 
@@ -180,15 +188,13 @@ async function ask(question) {
         } else if (event.type === "final") {
           renderFinal(bubble, event);
         } else if (event.type === "error") {
-          bubble.classList.add("err");
-          bubble.textContent = "出错了：" + event.detail;
+          addError(bubble, "出错了：" + event.detail);
         }
       });
       window.scrollTo(0, document.body.scrollHeight);
     }
   } catch (error) {
-    bubble.textContent = "网络错误，请重试";
-    bubble.classList.add("err");
+    addError(bubble, "网络错误，请重试");
   } finally {
     btn.disabled = false;
     input.focus();
