@@ -8,6 +8,7 @@ import re
 TOLERANCE = 1e-6
 _TOKEN = re.compile(r"(?<![A-Za-z0-9])(-?\d[\d,]*(?:\.\d+)?)\s*(%?)")
 _DATE_SUFFIX = "年月日号"
+_DATE = re.compile(r"(?<!\d)\d{4}\s*[-/]\s*\d{1,2}(?:\s*[-/]\s*\d{1,2})?(?!\d)")
 
 
 def _round_for_compare(value: float) -> float:
@@ -22,11 +23,15 @@ def _same(left: float, right: float) -> bool:
 
 
 def _tokens(text: str):
-    """逐个吐出 (数值,是否百分号,是否日期的一部分)"""
+    """逐个吐出(数值,是否百分号,是否日期的一部分)"""
     body = text or ""
+    date_spans = [(match.start(), match.end()) for match in _DATE.finditer(body)]
     for match in _TOKEN.finditer(body):
+        if any(start <= match.start() < end for start, end in date_spans):
+            continue
         after = body[match.end():match.end() + 3].lstrip()
-        yield float(match.group(1).replace(",", "")), match.group(2) == "%", after[:1] in _DATE_SUFFIX
+        is_date = bool(after) and after[0] in _DATE_SUFFIX
+        yield float(match.group(1).replace(",", "")), match.group(2) == "%", is_date
 
 
 def numbers_in(text: str) -> list[float]:

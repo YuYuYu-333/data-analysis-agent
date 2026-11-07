@@ -51,3 +51,20 @@ def test_candidate_may_have_extra_columns():
 
 def test_candidate_missing_a_value_fails():
     assert not rows_match([["P01", "毛巾", 100]], [["毛巾", 100]])
+
+
+def test_wrong_value_in_second_column_fails():
+    assert not rows_match([["毛巾", 100]], [["毛巾", 999999.0]])
+
+
+def test_wrong_value_in_third_column_fails():
+    assert not rows_match([["华东", 3, 100]], [["华东", 3, 999999.0]])
+
+
+def test_missing_middle_value_fails():
+    assert not rows_match([["华东", 3, 100]], [["华东", 0, 100]])
+
+
+def test_duplicate_values_need_matching_counts():
+    """行内同一个值出现两次，候选也得有两次"""
+    assert not rows_match([[1, 1]], [[1, 2]])

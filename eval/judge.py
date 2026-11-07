@@ -29,7 +29,7 @@ def _normalize_value(value: Any) -> tuple:
     return ("other", repr(value))
 
 
-def _row_contains(reference_row: list[Any],candidate_row: list[Any]) -> bool:
+def _row_contains(reference_row: list[Any], candidate_row: list[Any]) -> bool:
     """候选行必须包含参考行里的每个值；候选允许有多余的列"""
     remaining = [_normalize_value(v) for v in candidate_row]
     for ref_value in (_normalize_value(v) for v in reference_row):
@@ -39,7 +39,7 @@ def _row_contains(reference_row: list[Any],candidate_row: list[Any]) -> bool:
                 break
         else:
             return False
-        return True
+    return True
 
 
 def _value_equal(left: tuple, right: tuple) -> bool:

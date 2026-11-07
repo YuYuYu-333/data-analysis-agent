@@ -70,3 +70,42 @@ def test_sign_flip_still_counts_as_citation():
         [[-2445.54]], "9月比8月多了多少")
     assert not missing
     assert citations[0]["value"] == -2445.54
+
+
+def test_number_at_end_of_answer_is_checked():
+    """句尾没有标点，after 是空串；空串不能当成日期后缀"""
+    citations, missing = find_citations("销售额为 999.99", ["sales"], [[12345.67]])
+    assert citations == []
+    assert missing == [999.99]
+
+
+def test_number_at_end_of_answer_with_period_is_checked():
+    """对照组：有句号时一直是对的，说明问题只在句尾"""
+    citations, missing = find_citations("销售额为999.99。", ["sales"], [[12345.67]])
+    assert missing == [999.99]
+
+
+def test_percent_at_end_of_answer_is_checked():
+    citations, missing = find_citations("线上订单占比 99.9%", ["share"], [[0.5231]])
+    assert missing == [99.9]
+
+
+def test_iso_date_is_ignored_as_a_whole():
+    citations, missing = find_citations(
+        "2026-09-04 卖了 12345.67 元", ["sales"],
+        [[12345.67]])
+    assert missing == []
+    assert len(citations) == 1
+
+
+def test_slash_date_is_ignored():
+    citations, missing = find_citations(
+        "2026/9/4 卖了 12345.67 元", ["sales"],
+        [[12345.67]])
+    assert missing == []
+
+
+def test_iso_date_at_end_is_ignored():
+    """日期在句尾时，三个数字一个都不能漏判"""
+    citations, missing = find_citations("数据截至 2026 - 09 - 04", ["sales"], [[12345.67]])
+    assert missing == []
