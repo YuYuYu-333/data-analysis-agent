@@ -22,6 +22,12 @@ COLUMNS_ONLY = """
     sales_item(item_id, order_id, product_id, quantity, unit_price, amount, refunded, refund_amount)
     """
 
+CORE_METRICS = """### 核心口径（恒定提供，不靠检索）
+      销售额 = SUM(sales_item.amount - sales_item.refund_amount)，仅统计 completed 订单；discount_amount 不再减（unit_price 已含优惠）。
+      订单数 = COUNT(DISTINCT sales_order.order_id)，仅统计 completed 订单；不能 COUNT(*) 明细行，也不能不去重。
+      客单价 = 销售额 / 订单数，分子分母限定在同一时间与筛选范围内。
+      """
+
 SYSTEM_PROMPT = """你是 SQLite 数据分析助手. 根据给定的表结构和业务口径，把用户问题翻译成一条 SQLite 查询.
 规则：
     1. 只输出 SQL，不要解释，不要 markdown 代码块。
@@ -46,6 +52,14 @@ FINAL_RETRY_HINT = """这是第三次尝试，前两次都没成功。不要原�
       """
 
 
+def _schema_context(mode: str | None, chunks_text: str) -> str:
+    """columns 模式只给列名；rag 模式恒定带上三块核心口径，长尾小节才靠检索"""
+    if mode == "columns":
+        return COLUMNS_ONLY
+    context = COLUMNS_ONLY + CORE_METRICS
+    return context + ("\n\n" + chunks_text if chunks_text else "")
+
+
 def _trail(state: AnalysisState, *items: str) -> list[str]:
     """在这一轮的轨迹末尾追加；每轮从空列表开始，所以不会跨轮累加"""
     return [*(state.get("trace") or []), *items]
@@ -68,22 +82,23 @@ def _extract_sql(text: str) -> str:
 
 
 async def retrieve_schema(state: AnalysisState) -> dict:
-    if state.get("schema_mode") == "columns":
-        return {"schema_context": COLUMNS_ONLY, "trace": _trail(state, "schema: columns only")}
+    mode = state.get("schema_mode")
+    if mode == "columns":
+        return {"schema_context": _schema_context(mode, ""), "trace": _trail(state, "schema: columns only")}
 
     try:
         result = await search_schema(state["question"], top_k=5)
         chunks = result.get("chunks", [])
         chunks_text = "\n\n".join(chunk["text"] for chunk in chunks)
-        context = COLUMNS_ONLY + ("\n\n" + chunks_text if chunks_text else "")
         return {
-            "schema_context": context,
+            "schema_context": _schema_context(mode, chunks_text),
             "trace": _trail(state, f"schema: {len(chunks)} chunks"),
         }
     except Exception as exc:
         return {
-            "schema_context": COLUMNS_ONLY,
-            "trace": _trail(state, f"schema error: {exc}"), }
+            "schema_context": _schema_context(mode, ""),
+            "trace": _trail(state, f"schema error: {exc}"),
+        }
 
 
 async def generate_sql(state: AnalysisState) -> dict:

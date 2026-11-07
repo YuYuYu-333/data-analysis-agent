@@ -151,3 +151,21 @@ def test_final_attempt_changes_strategy(monkeypatch):
     _capture_llm(monkeypatch, box)
     asyncio.run(graph_module.generate_sql({"question": "q", "attempts": 2, "error": "no such column: x"}))
     assert "第三次尝试" in box["text"]
+
+
+def test_columns_mode_has_no_core_metrics():
+    context = graph_module._schema_context("columns", "")
+    assert "sales_item.amount - sales_item.refund_amount" not in context
+    assert "COUNT(DISTINCT" not in context
+
+
+def test_rag_mode_always_carries_core_metrics():
+    context = graph_module._schema_context("rag", "")
+    assert "sales_item.amount - sales_item.refund_amount" in context
+    assert "COUNT(DISTINCT" in context
+
+
+def test_retrieved_chunks_append_to_core_metrics():
+    context = graph_module._schema_context("rag", "### 9. 已知陷阱\n取消订单不计")
+    assert "核心口径" in context
+    assert "取消订单不计" in context
