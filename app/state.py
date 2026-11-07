@@ -1,9 +1,12 @@
 """
 LangGraph 的状态定义。
+trace / tokens
+是每轮独立的普通字段，不是跨轮累加器：
+每轮开头由 _initial_state
+置空，节点自己把上一步的轨迹接上。
 """
 
-import operator
-from typing import Annotated, TypedDict
+from typing import TypedDict
 
 
 class AnalysisState(TypedDict, total=False):
@@ -22,5 +25,5 @@ class AnalysisState(TypedDict, total=False):
     raw_answer: str | None
     citations: list[dict]
     degraded: bool
-    trace: Annotated[list[str], operator.add]
-    tokens: Annotated[int, operator.add]
+    trace: list[str]
+    tokens: int

@@ -1,6 +1,6 @@
 """
 LangGraph 图：检索 schema → 生成 SQL → 执行 → 重试/出答案。
-当前只做单轮；多轮和溯源在后续接。
+多轮靠 checkpointer（thread_id = session_id）；答案出完后由 verify_citations 逐数字溯源。
 """
 
 import re
@@ -39,6 +39,17 @@ ANSWER_PROMPT = """你是数据分析助手。根据查询结果，用一句中�
     4. 一句话，不超过 80 字。
     """
 
+FINAL_RETRY_HINT = """这是第三次尝试，前两次都没成功。不要原样重写：
+      - 先只 SELECT一列，确认列名和过滤条件都成立，再补上维度和聚合
+      - 上一次若用了 JOIN 或子查询，换成另一种等价写法
+      - 列名以「表结构与业务口径」为准，不要自己造
+      """
+
+
+def _trail(state: AnalysisState, *items: str) -> list[str]:
+    """在这一轮的轨迹末尾追加；每轮从空列表开始，所以不会跨轮累加"""
+    return [*(state.get("trace") or []), *items]
+
 
 def _extract_sql(text: str) -> str:
     """从模型输出里取出 SQL；兼容 ```sql 代码块和前后解释"""
@@ -58,7 +69,7 @@ def _extract_sql(text: str) -> str:
 
 async def retrieve_schema(state: AnalysisState) -> dict:
     if state.get("schema_mode") == "columns":
-        return {"schema_context": COLUMNS_ONLY, "trace": ["schema: columns only"]}
+        return {"schema_context": COLUMNS_ONLY, "trace": _trail(state, "schema: columns only")}
 
     try:
         result = await search_schema(state["question"], top_k=5)
@@ -67,27 +78,27 @@ async def retrieve_schema(state: AnalysisState) -> dict:
         context = COLUMNS_ONLY + ("\n\n" + chunks_text if chunks_text else "")
         return {
             "schema_context": context,
-            "trace": [f"schema: {len(chunks)} chunks"],
+            "trace": _trail(state, f"schema: {len(chunks)} chunks"),
         }
     except Exception as exc:
         return {
             "schema_context": COLUMNS_ONLY,
-            "trace": [f"schema error: {exc}"],
-        }
+            "trace": _trail(state, f"schema error: {exc}"), }
 
 
 async def generate_sql(state: AnalysisState) -> dict:
     attempts = state.get("attempts", 0) + 1
     history = state.get("history") or []
     history_text = "\n".join(f"- 问：{item['question']}\n SQL：{item['sql']}" for item in history[-2:]) or "无"
+    retry_hint = FINAL_RETRY_HINT if attempts >= 3 else ""
 
     prompt = f"""
-    表结构与业务口径:{state.get('schema_context', '')}
-    最近两轮（追问时默认继承它们的时间范围和筛选条件）：{history_text}
-    上次 SQL 错误： {state.get('error') or '无'}
-    用户问题：{state['question']}
-    只输出一条 SQLite SQL.
-    """
+      表结构与业务口径:{state.get('schema_context', '')}
+      最近两轮（追问时默认继承它们的时间范围和筛选条件）：{history_text}
+      上次 SQL 错误： {state.get('error') or '无'}
+      用户问题：{state['question']}
+      只输出一条 SQLite SQL.{retry_hint}
+      """
 
     try:
         response = await chat_client.chat.completions.create(
@@ -102,15 +113,15 @@ async def generate_sql(state: AnalysisState) -> dict:
         return {
             "sql": sql,
             "attempts": attempts,
-            "trace": [f"sql generated (attempt {attempts})"],
-            "tokens": getattr(response.usage, "total_tokens", 0) or 0,
+            "trace": _trail(state, f"sql generated (attempt {attempts})"),
+            "tokens": (state.get("tokens") or 0) + (getattr(response.usage, "total_tokens", 0) or 0),
         }
     except Exception as exc:
         return {
             "sql": "",
             "attempts": attempts,
             "error": f"模型调用失败：{exc}",
-            "trace": [f"llm error: {exc}"],
+            "trace": _trail(state, f"llm error: {exc}"),
         }
 
 
@@ -123,7 +134,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             "columns": None,
             "rows": None,
             "truncated": False,
-            "trace": [f"mcp error: {exc}"],
+            "trace": _trail(state, f"mcp error: {exc}"),
         }
     if "error" in result:
         return {
@@ -131,14 +142,14 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             "columns": None,
             "rows": None,
             "truncated": False,
-            "trace": [f"sql error: {result['error']}"],
+            "trace": _trail(state, f"sql error: {result['error']}"),
         }
     return {
         "error": None,
         "columns": result["columns"],
         "rows": result["rows"],
         "truncated": result["truncated"],
-        "trace": [f"sql ok: {result['row_count']} rows"],
+        "trace": _trail(state, f"sql ok: {result['row_count']} rows"),
     }
 
 
@@ -165,7 +176,7 @@ async def build_answer(state: AnalysisState) -> dict:
             "citations": [],
             "degraded": False,
             "history": history,
-            "trace": ["answer: empty result"],
+            "trace": _trail(state, "answer: empty result"),
         }
 
     table = format_table(columns, rows)
@@ -191,7 +202,7 @@ async def build_answer(state: AnalysisState) -> dict:
             "citations": [],
             "degraded": True,
             "history": history,
-            "trace": [f"answer llm error: {exc}"],
+            "trace": _trail(state, f"answer llm error: {exc}"),
         }
 
     return {
@@ -200,15 +211,21 @@ async def build_answer(state: AnalysisState) -> dict:
         "citations": [],
         "degraded": False,
         "history": history,
-        "trace": ["answer generated"],
-        "tokens": getattr(response.usage, "total_tokens", 0) or 0,
+        "trace": _trail(state, "answer generated"),
+        "tokens": (state.get("tokens") or 0) + (getattr(response.usage, "total_tokens", 0) or 0),
     }
 
 
 def verify_citations(state: AnalysisState) -> dict:
+    if state.get("degraded"):
+        return {
+            "degraded": True,
+            "trace": _trail(state, "citations: skipped (already degraded)"),
+        }
+
     rows = state.get("rows") or []
     if not rows:
-        return {"degraded": False, "trace": ["citations: no rows"]}
+        return {"degraded": False, "trace": _trail(state, "citations: no rows")}
 
     columns = state.get("columns") or []
     citations, missing = find_citations(
@@ -222,12 +239,12 @@ def verify_citations(state: AnalysisState) -> dict:
             "answer": format_table(columns, rows),
             "citations": [],
             "degraded": True,
-            "trace": [f"citations: {len(missing)} unmatched -> degraded"],
+            "trace": _trail(state, f"citations: {len(missing)} unmatched -> degraded"),
         }
     return {
         "citations": citations,
         "degraded": False,
-        "trace": [f"citations: {len(citations)} ok"],
+        "trace": _trail(state, f"citations: {len(citations)} ok"),
     }
 
 
@@ -235,7 +252,7 @@ def give_up(state: AnalysisState) -> dict:
     return {
         "answer": f"查不出来: {state.get('error') or '未知错误'}",
         "degraded": True,
-        "trace": ["give up"]
+        "trace": _trail(state, "give up"),
     }
 
 
