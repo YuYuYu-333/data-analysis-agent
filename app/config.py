@@ -21,7 +21,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # 服务层
 API_KEY = os.getenv("API_KEY")
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
-
+TRUST_PROXY = os.getenv("TRUST_PROXY", "").lower() in ("1", "true", "yes")
 
 def _require(name: str, value: str | None) -> None:
     if not value:

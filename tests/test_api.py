@@ -82,6 +82,7 @@ def test_demo_rate_limit_returns_429(client, monkeypatch):
 
 
 def test_different_ips_have_separate_quota(client, monkeypatch):
+    monkeypatch.setattr(api, "TRUST_PROXY", True, raising=False)
     monkeypatch.setattr(api, "demo_limiter", api.RateLimiter(1))
 
     async def fake_agent(question, session_id, schema_mode):
@@ -143,3 +144,60 @@ def test_stream_returns_sse(client, monkeypatch):
     assert '"type": "step"' in response.text
     assert '"label": "生成 SQL"' in response.text
     assert '"type": "final"' in response.text
+
+
+def test_unknown_path_does_not_create_new_label(client):
+    """指标标签用路由模板；随便一个 URL 不能新增一条时间序列"""
+    client.get("/nope")
+    text = client.get("/metrics").text
+    assert 'endpoint="/nope"' not in text
+    assert 'endpoint="unmatched"' in text
+
+
+def test_startup_survives_mcp_failure(monkeypatch):
+    """MCP 连不上时进程仍要起来，依赖状态交给 /ready 报告"""
+
+    async def broken():
+        raise RuntimeError("mcp down")
+
+    monkeypatch.setattr(api, "connect", broken)
+    with TestClient(api.app) as client:
+        assert client.get("/health").status_code == 200
+
+
+def _ok_agent(monkeypatch):
+    async def fake(question, session_id, schema_mode):
+        return {"answer": "ok", "columns": [], "rows": [], "citations": [], "attempts": 1, "degraded": False}
+
+    monkeypatch.setattr(api, "run_agent", fake)
+
+
+def test_forwarded_header_is_ignored_by_default(client, monkeypatch):
+    """没开 TRUST_PROXY 时，客户端自己写的头不算数"""
+    monkeypatch.setattr(api, "TRUST_PROXY", False, raising=False)
+    monkeypatch.setattr(api, "demo_limiter", api.RateLimiter(1))
+    _ok_agent(monkeypatch)
+    codes = [
+        client.post(
+            "/demo/analyze",
+            json={"question": "x"},
+            headers={"X-Forwarded-For": ip}
+        ).status_code for ip in ("1.1.1.1", "2.2.2.2")
+    ]
+    assert codes == [200, 429]
+
+
+def test_forwarded_header_uses_last_hop(client, monkeypatch):
+    """信任代理时取最后一跳，前面那截是客户端能伪造的"""
+    monkeypatch.setattr(api, "TRUST_PROXY", True, raising=False)
+    monkeypatch.setattr(api, "demo_limiter", api.RateLimiter(1))
+    _ok_agent(monkeypatch)
+    codes = [
+        client.post(
+            "/demo/analyze",
+            json={"question": "x"},
+            headers={"X-Forwarded-For": f"{ip}, 9.9.9.9"}
+        ).status_code
+        for ip in ("1.1.1.1", "2.2.2.2")
+    ]
+    assert codes == [200, 429]

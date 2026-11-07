@@ -108,10 +108,7 @@ def _parse_result(result):
 
 async def _call(name: str, payload: dict) -> dict:
     tools = await get_tools()
-    try:
-        return _parse_result(await tools[name].ainvoke(payload))
-    except Exception:
-        return _parse_result(await tools[name].ainvoke(payload))
+    return _parse_result(await tools[name].ainvoke(payload))
 
 
 async def search_schema(query: str, top_k: int = 3) -> dict:

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from app.checkpointer import close_checkpointer, get_checkpointer
-from app.config import API_KEY, DEBUG, ROOT
+from app.config import API_KEY, DEBUG, ROOT, TRUST_PROXY
 from app.graph import analyze as run_agent, analyze_stream
 from app.limits import API_PER_MINUTE, DEMO_PER_MINUTE, RateLimiter
 from app.logging import request_id_var, setup_logging
@@ -23,18 +23,23 @@ from app.mcp_client import close_client, connect, describe_tables
 from app.models import AnalyzeRequest, AnalyzeResponse
 from app.session_lock import SessionLocks
 
+logger = logging.getLogger("app.api")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
-    await connect()
+    try:
+        await connect()
+    except Exception as exc:
+        # 依赖挂了也要能回话：/health 继续活着， / ready 会报出哪项不行
+        logger.warning("MCP 启动连接失败: %s", exc)
     yield
     await close_client()
     await close_checkpointer()
 
 
 app = FastAPI(title="data-analysis-agent", lifespan=lifespan)
-logger = logging.getLogger("app.api")
 demo_limiter = RateLimiter(DEMO_PER_MINUTE)
 api_limiter = RateLimiter(API_PER_MINUTE)
 session_locks = SessionLocks()
@@ -56,6 +61,12 @@ STEP_LABELS = {
 }
 
 
+def _endpoint_label(request: Request) -> str:
+    """指标标签用路由模板；同一个接口的不同 URL 必须算同一条时间序列"""
+    route = request.scope.get("route")
+    return getattr(route, "path", "unmatched")
+
+
 @app.middleware("http")
 async def request_context(request: Request, call_next):
     request_id = request.headers.get("x-request-id") or uuid4().hex[:12]
@@ -64,13 +75,14 @@ async def request_context(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception:
-        REQUESTS.labels(endpoint=request.url.path, status="500").inc()
+        REQUESTS.labels(endpoint=_endpoint_label(request), status="500").inc()
         logger.exception("request failed")
         raise
     else:
+        endpoint = _endpoint_label(request)
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
-        REQUESTS.labels(endpoint=request.url.path, status=str(response.status_code)).inc()
-        DURATION.labels(endpoint=request.url.path).observe(latency_ms / 1000)
+        REQUESTS.labels(endpoint=endpoint, status=str(response.status_code)).inc()
+        DURATION.labels(endpoint=endpoint).observe(latency_ms / 1000)
         response.headers["X-Request-Id"] = request_id
         logger.info("request", extra={"latency_ms": latency_ms, "status": response.status_code})
         return response
@@ -79,10 +91,13 @@ async def request_context(request: Request, call_next):
 
 
 def client_ip(request: Request) -> str:
-    """Render 会在 X-Forwarded-For 里塞真实 IP；直连时用它自己的"""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """只有开了 TRUST_PROXY 才读 X-Forwarded-For。
+    代理会把自己看到的对端追加在末尾，所以取最后一跳；
+    前面那截客户端自己就能写，取第一跳等于允许伪造。"""
+    if TRUST_PROXY:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
