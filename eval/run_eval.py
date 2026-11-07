@@ -56,8 +56,9 @@ def summarize(mode: str, results: list[dict]) -> dict:
         rows = [r for r in results if r["level"] == level]
         hits = sum(1 for r in rows if r["correct"])
         by_level[level] = {"total": len(rows), "correct": hits, "rate": rate(hits, len(rows))}
-        answered = [r for r in results if r["row_count"] > 0]
-        degraded = [r for r in answered if r["degraded"]]
+
+    answered = [r for r in results if r["row_count"] > 0]
+    degraded = [r for r in answered if r["degraded"]]
 
     return {
         "mode": mode,
