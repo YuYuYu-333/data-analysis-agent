@@ -130,9 +130,17 @@ function addError(bubble, text) {
 function renderFinal(bubble, data) {
   localStorage.setItem("session_id", data.session_id);
   const answer = document.createElement("div");
-  answer.textContent = data.degraded
-    ? "（回答里有数字没能溯源，已降级为表格）"
-    : (data.answer || "（没有答案）");
+  if (data.degraded && data.degrade_reason === "give_up") {
+    // 放弃时 data.answer 就是真正的错误信息，原样显示
+    answer.className = "err";
+    answer.textContent = data.answer || "（查不出来）";
+  } else if (data.degraded) {
+    answer.textContent = data.degrade_reason === "answer_llm"
+      ? "（写结论的模型调用失败，已直接展示查询结果）"
+      : "（回答里有数字没能溯源，已降级为表格）";
+  } else {
+    answer.textContent = data.answer || "（没有答案）";
+  }
   bubble.appendChild(answer);
   if (data.columns.length && data.rows.length) {
     appendTable(bubble, data.columns, data.rows);
@@ -140,7 +148,7 @@ function renderFinal(bubble, data) {
   const meta = document.createElement("div");
   meta.className = "meta";
   meta.textContent = "尝试 " + data.attempts + " 次 · 溯源 " + data.citations.length + " 条"
-    + (data.degraded ? " · 已降级为表格" : "");
+    + (data.degraded && data.degrade_reason !== "give_up" ? " · 已降级为表格" : "");
   bubble.appendChild(meta);
 }
 

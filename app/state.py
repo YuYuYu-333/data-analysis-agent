@@ -25,5 +25,6 @@ class AnalysisState(TypedDict, total=False):
     raw_answer: str | None
     citations: list[dict]
     degraded: bool
+    degrade_reason: str | None
     trace: list[str]
     tokens: int

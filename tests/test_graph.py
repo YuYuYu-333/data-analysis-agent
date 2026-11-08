@@ -55,6 +55,7 @@ def test_verify_citations_degrades_on_fake_number():
     })
     assert result["degraded"] is True
     assert result["answer"].startswith("sales")
+    assert result["degrade_reason"] == "citations"
 
 
 def test_verify_citations_skips_when_no_rows():
@@ -169,3 +170,78 @@ def test_retrieved_chunks_append_to_core_metrics():
     context = graph_module._schema_context("rag", "### 9. 已知陷阱\n取消订单不计")
     assert "核心口径" in context
     assert "取消订单不计" in context
+
+
+def test_core_mode_has_core_metrics_but_ignores_chunks():
+    context = graph_module._schema_context("core", "### 9. 已知陷阱\n取消订单不计")
+    assert "sales_item.amount - sales_item.refund_amount" in context
+    assert "已知陷阱" not in context
+
+
+def test_core_mode_never_calls_retrieval(monkeypatch):
+    async def boom(*args, **kwargs):
+        raise AssertionError("core 模式不应该调用检索")
+
+    monkeypatch.setattr(graph_module, "search_schema", boom)
+    result = asyncio.run(graph_module.retrieve_schema({"question": "q", "schema_mode": "core"}))
+    assert "核心口径" in result["schema_context"]
+
+
+def test_answer_llm_failure_marks_reason(monkeypatch):
+    class Boom:
+        async def create(self, **kwargs):
+            raise RuntimeError("api down")
+
+    monkeypatch.setattr(
+        graph_module, "chat_client",
+        SimpleNamespace(chat=SimpleNamespace(completions=Boom())), )
+    result = asyncio.run(
+        graph_module.build_answer({"question": "q", "sql": "SELECT 1", "columns": ["n"], "rows": [[1]], }))
+    assert result["degraded"] is True
+    assert result["degrade_reason"] == "answer_llm"
+
+
+def test_give_up_turn_does_not_reuse_previous_citations(monkeypatch):
+    """上一轮成功的 citations 不能跟着 give_up 一起返回"""
+    calls = {"n": 0}
+
+    async def fake_schema(state):
+        return {"schema_context": ""}
+
+    async def fake_sql(state):
+        calls["n"] += 1
+        return {"sql": "SELECT 1", "attempts": 1 if calls["n"] == 1 else 3}
+
+    async def fake_execute(state):
+        if state.get("attempts") == 1:
+            return {"error": None, "columns": ["n"], "rows": [[1]], "truncated": False}
+        return {"error": "no such column: x", "columns": None, "rows": None, "truncated": False}
+
+    async def fake_answer(state):
+        return {
+            "answer": "1",
+            "raw_answer": "1",
+            "citations": [],
+            "degraded": False,
+            "history": []
+        }
+
+    monkeypatch.setattr(graph_module, "retrieve_schema", fake_schema)
+    monkeypatch.setattr(graph_module, "generate_sql", fake_sql)
+    monkeypatch.setattr(graph_module, "execute_sql_node", fake_execute)
+    monkeypatch.setattr(graph_module, "build_answer", fake_answer)
+
+    graph = graph_module.build_graph(MemorySaver())
+    config = {"configurable": {"thread_id": "t-reset"}}
+
+    async def run():
+        first = await graph.ainvoke(graph_module._initial_state("q1", "t-reset", "rag"), config)
+        second = await graph.ainvoke(graph_module._initial_state("q2", "t-reset", "rag"), config)
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert len(first["citations"]) == 1
+    assert second["citations"] == []
+    assert second["degraded"] is True
+    assert second["degrade_reason"] == "give_up"
+    assert "no such column" in second["answer"]

@@ -121,6 +121,7 @@ def _to_response(session_id: str, state: dict) -> AnalyzeResponse:
         citations=state.get("citations") or [],
         attempts=state.get("attempts", 0),
         degraded=bool(state.get("degraded")),
+        degrade_reason=state.get("degrade_reason"),
         trace=state.get("trace") if DEBUG else None,
     )
 

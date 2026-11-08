@@ -20,4 +20,5 @@ class AnalyzeResponse(BaseModel):
     citations: list[dict]
     attempts: int
     degraded: bool
+    degrade_reason: str | None = None
     trace: list[str] | None = None

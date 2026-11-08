@@ -57,6 +57,8 @@ def _schema_context(mode: str | None, chunks_text: str) -> str:
     if mode == "columns":
         return COLUMNS_ONLY
     context = COLUMNS_ONLY + CORE_METRICS
+    if mode == "core":
+        return context
     return context + ("\n\n" + chunks_text if chunks_text else "")
 
 
@@ -85,6 +87,8 @@ async def retrieve_schema(state: AnalysisState) -> dict:
     mode = state.get("schema_mode")
     if mode == "columns":
         return {"schema_context": _schema_context(mode, ""), "trace": _trail(state, "schema: columns only")}
+    if mode == "core":
+        return {"schema_context": _schema_context(mode, ""), "trace": _trail(state, "schema: columns + core metrics")}
 
     try:
         result = await search_schema(state["question"], top_k=5)
@@ -218,6 +222,7 @@ async def build_answer(state: AnalysisState) -> dict:
             "degraded": True,
             "history": history,
             "trace": _trail(state, f"answer llm error: {exc}"),
+            "degrade_reason": "answer_llm",
         }
 
     return {
@@ -254,6 +259,7 @@ def verify_citations(state: AnalysisState) -> dict:
             "answer": format_table(columns, rows),
             "citations": [],
             "degraded": True,
+            "degrade_reason": "citations",
             "trace": _trail(state, f"citations: {len(missing)} unmatched -> degraded"),
         }
     return {
@@ -267,6 +273,7 @@ def give_up(state: AnalysisState) -> dict:
     return {
         "answer": f"查不出来: {state.get('error') or '未知错误'}",
         "degraded": True,
+        "degrade_reason": "give_up",
         "trace": _trail(state, "give up"),
     }
 
@@ -318,6 +325,9 @@ def _initial_state(question: str, session_id: str, schema_mode: str) -> Analysis
         "error": None,
         "tokens": 0,
         "trace": [],
+        "citations": [],
+        "raw_answer": None,
+        "degrade_reason": None,
     }
 
 
