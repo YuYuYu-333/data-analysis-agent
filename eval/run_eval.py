@@ -123,7 +123,7 @@ async def run(mode: str, turns: str, session: str | None = None) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["columns","core", "rag"], required=True)
+    parser.add_argument("--mode", choices=["columns", "core", "full", "rag"], required=True)
     parser.add_argument("--turns", choices=["first", "all"], default="all")
     parser.add_argument("--session", default=None, help="只跑某个会话，例如 E09")
     args = parser.parse_args()

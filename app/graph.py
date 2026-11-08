@@ -5,6 +5,7 @@ LangGraph 图：检索 schema → 生成 SQL → 执行 → 重试/出答案。
 
 import re
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from langgraph.graph import END, START, StateGraph
 
@@ -14,6 +15,8 @@ from app.llm import CHAT_MODEL, chat_client
 from app.mcp_client import execute_sql as mcp_execute_sql
 from app.mcp_client import search_schema
 from app.state import AnalysisState
+
+FULL_SCHEMA = (Path(__file__).resolve().parents[1] / "data" / "schema.md").read_text(encoding="utf-8")
 
 COLUMNS_ONLY = """
     store(store_id, store_name,region, city, opened_at)
@@ -56,6 +59,8 @@ def _schema_context(mode: str | None, chunks_text: str) -> str:
     """columns 模式只给列名；rag 模式恒定带上三块核心口径，长尾小节才靠检索"""
     if mode == "columns":
         return COLUMNS_ONLY
+    if mode == "full":
+        return COLUMNS_ONLY + FULL_SCHEMA
     context = COLUMNS_ONLY + CORE_METRICS
     if mode == "core":
         return context
@@ -86,9 +91,20 @@ def _extract_sql(text: str) -> str:
 async def retrieve_schema(state: AnalysisState) -> dict:
     mode = state.get("schema_mode")
     if mode == "columns":
-        return {"schema_context": _schema_context(mode, ""), "trace": _trail(state, "schema: columns only")}
+        return {
+            "schema_context": _schema_context(mode, ""),
+            "trace": _trail(state, "schema: columns only"),
+        }
     if mode == "core":
-        return {"schema_context": _schema_context(mode, ""), "trace": _trail(state, "schema: columns + core metrics")}
+        return {
+            "schema_context": _schema_context(mode, ""),
+            "trace": _trail(state, "schema: columns + core metrics"),
+        }
+    if mode == "full":
+        return {
+            "schema_context": _schema_context(mode, ""),
+            "trace": _trail(state, "schema: full document"),
+        }
 
     try:
         result = await search_schema(state["question"], top_k=5)

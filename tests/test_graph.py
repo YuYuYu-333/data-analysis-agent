@@ -245,3 +245,13 @@ def test_give_up_turn_does_not_reuse_previous_citations(monkeypatch):
     assert second["degraded"] is True
     assert second["degrade_reason"] == "give_up"
     assert "no such column" in second["answer"]
+
+
+def test_full_mode_pastes_whole_document_without_retrieval(monkeypatch):
+    async def boom(*args, **kwargs):
+        raise AssertionError("full 模式不应该调用检索")
+
+    monkeypatch.setattr(graph_module, "search_schema", boom)
+    result = asyncio.run(graph_module.retrieve_schema({"question": "q", "schema_mode": "full"}))
+    assert "8.1 销售额" in result["schema_context"]
+    assert "已知陷阱" in result["schema_context"]
