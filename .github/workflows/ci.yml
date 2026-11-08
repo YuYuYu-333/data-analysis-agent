@@ -18,6 +18,11 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements-dev.txt
 
+      - name: 生成测试数据
+        # test_db_server.py 里 5 条执行路径标了 skipif(not DB_PATH.exists())；
+        # *.db 不进仓库，不生成就永远是 skip，等于没测
+        run: python scripts/generate_data.py
+
       - name: 跑测试
         env:
           # config.py 在 import 阶段校验这些值；测试不调真实模型，占位即可
