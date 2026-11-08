@@ -43,19 +43,26 @@ def _build_client() -> MultiServerMCPClient:
 
 
 async def get_tools() -> dict[str, BaseTool]:
-    """第一次调用时启动两个 Server 并保持会话；之后复用工具对象"""
+    """第一次调用时启动两个 Server 并保持会话；之后复用工具对象。中途失败就把已经开起来的会话关掉，否则子进程没人收。"""
     global _client, _tools, _stack
     if _tools is not None:
         return _tools
 
-    _client = _build_client()
-    _stack = AsyncExitStack()
-    tools: dict[str, BaseTool] = {}
-    for server_name in ("schema", "database"):
-        session = await _stack.enter_async_context(_client.session(server_name))
-        for tool in await load_mcp_tools(session):
-            tools[tool.name] = tool
-    _tools = tools
+    client = _build_client()
+    stack = AsyncExitStack()
+    try:
+        tools: dict[str, BaseTool] = {}
+        for server_name in ("schema", "database"):
+            session = await stack.enter_async_context(client.session(server_name))
+            for tool in await load_mcp_tools(session):
+                tools[tool.name] = tool
+    except BaseException:
+        try:
+            await stack.aclose()
+        except Exception:
+            pass
+        raise
+    _client, _stack, _tools = client, stack, tools
     return _tools
 
 

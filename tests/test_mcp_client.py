@@ -42,3 +42,46 @@ def test_call_does_not_retry_silently(monkeypatch):
     monkeypatch.setattr(mcp_client, "get_tools", fake_tools)
     with pytest.raises(RuntimeError): asyncio.run(mcp_client.execute_sql("SELECT 1"))
     assert tool.calls == 1
+
+
+class _FakeSession:
+    def __init__(self, name, closed):
+        self.name = name
+        self.closed = closed
+
+    async def __aenter__(self):
+        if self.name == "database":
+            raise RuntimeError("server 起不来")
+        return self
+
+    async def __aexit__(self, *exc):
+        self.closed.append(self.name)
+
+
+class _FakeClient:
+    def __init__(self, closed):
+        self.closed = closed
+
+    def session(self, name):
+        return _FakeSession(name, self.closed)
+
+
+def test_get_tools_closes_started_sessions_on_failure(monkeypatch):
+    """第二个 server 起不来时，第一个已经起来的会话必须关掉"""
+    closed = []
+
+    async def fake_load(session):
+        return []
+
+    monkeypatch.setattr(mcp_client, "_build_client", lambda: _FakeClient(closed))
+    monkeypatch.setattr(mcp_client, "load_mcp_tools", fake_load)
+    monkeypatch.setattr(mcp_client, "_client", None)
+    monkeypatch.setattr(mcp_client, "_tools", None)
+    monkeypatch.setattr(mcp_client, "_stack", None)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(mcp_client.get_tools())
+
+    assert closed == ["schema"]
+    assert mcp_client._stack is None
+    assert mcp_client._tools is None
