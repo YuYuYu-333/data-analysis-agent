@@ -1,8 +1,10 @@
-# 零售数据分析 Agent
+# 零售数据分析 Agent：每个数字都要有出处
 
 ![tests](https://github.com/YuYuYu-333/data-analysis-agent/actions/workflows/ci.yml/badge.svg)
 
 用自然语言问零售数据。Agent 把问题翻译成一条只读 SQL，执行后给出中文结论——**结论里的每个数字都必须能追溯到结果集的某一格**，追溯不到就降级成纯表格，不编。
+
+难的不是写 SQL，是 SQL 写错了不会报错：它照样返回一个看起来完全合理的数字。
 
 多轮追问会继承上文："那华南呢？"这句话里既没有时间也没有指标，系统照样答出华南 9 月的销售额。
 
@@ -10,14 +12,16 @@
 
 ![在线演示](docs/demo.png)
 
-- **六节点图**：`retrieve_schema → generate_sql → execute_sql → route → build_answer → verify_citations`，出错回填重试，硬上限 3 次
-- **多轮**：`AsyncSqliteSaver` 按 `session_id` 持久化，最近两轮 `(问题, SQL)` 进 prompt
-- **数字溯源**：回答里的每个数字都要在结果单元格里找到出处，否则整段降级为表格
+- **数字溯源**：回答里的每个数字都要在结果单元格里找到出处，否则整段降级为表格；`degraded` 的三种原因（溯源失败 / 写答案的模型失败 / 三次查不出来）分开上报
 - **只读防护**：四道硬拦截（只读连接 / SELECT·WITH 白名单 / 关键字黑名单 / 多语句），外加 1000 行上限与 5 秒超时
-- **RAG 检索**：`schema.md` 切 22 块，bge-m3 召回 top 10，再交给 `bge-reranker-v2-m3` 重排取 top 5；重排不可用时自动退回向量顺序
-- **工具层隔离**：两个 MCP stdio Server，应用进程里**没有数据库路径，也没有连接对象**
+- **工具层隔离（MCP）**：两个 stdio Server，应用进程里**没有数据库路径，也没有连接对象**
+- **六节点图**：`retrieve_schema → generate_sql → execute_sql → route → build_answer → verify_citations`，出错回填重试，硬上限 3 次；**走哪条路是代码决定的，不是模型决定的**
+- **多轮**：`AsyncSqliteSaver` 按 `session_id` 持久化，最近两轮 `(问题, SQL)` 进 prompt
+- **口径常驻 + 检索只负责长尾**：三块核心口径恒定拼进上下文；`schema.md` 切 22 块，bge-m3 召回 top 10、重排取 top 5，只补枚举值和退款率这类长尾。对照实验：口径值 13–14 题，检索值 2–3 题
 - **L3 外壳**：API key 鉴权、IP 限流、`request_id` 结构化日志、Prometheus 指标
-- **可评测**：20 题单轮对照（含「口径常驻但不检索」的对照组）+ 50 轮多轮评测，判定器与题库都在仓库里
+- **评测**：20 题单轮（含「口径常驻但不检索」的对照组）+ 50 轮多轮；判定器坏过一次——每行只比第一列，旧数字全部作废重跑
+
+这份 README 最值得看的是第 11、12、13 次迭代：三次都是我自己的数字在骗我。
 
 **技术栈**：Python 3.13 · FastAPI · LangGraph · RAG · MCP · DeepSeek · bge-m3 · bge-reranker · SQLite · Prometheus · pytest
 
